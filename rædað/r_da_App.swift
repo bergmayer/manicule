@@ -1,0 +1,46 @@
+//
+//  r_da_App.swift
+//  rædað
+//
+//  Created by John Bergmayer on 2/24/26.
+//
+
+import SwiftUI
+
+@main
+struct r_da_App: App {
+    var body: some Scene {
+        #if os(iOS)
+        WindowGroup {
+            IOSRootView()
+        }
+        .commands {
+            ReaderMenuCommands()
+        }
+        #else
+        DocumentGroup(viewing: ReaderDocument.self) { configuration in
+            DocumentViewer(
+                document: configuration.document,
+                fileURL: configuration.fileURL
+            )
+        }
+        .defaultSize(width: 800, height: 1000)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .commands {
+            ReaderMenuCommands()
+        }
+
+        Settings {
+            TabView {
+                ReadingSettingsView(fileHash: nil)
+                    .tabItem { Label("Reading", systemImage: "textformat.size") }
+                NavigationStack {
+                    PerBookSettingsView()
+                }
+                    .tabItem { Label("Books", systemImage: "books.vertical") }
+            }
+            .frame(minWidth: 560, idealWidth: 600, maxWidth: 640, minHeight: 600)
+        }
+        #endif
+    }
+}

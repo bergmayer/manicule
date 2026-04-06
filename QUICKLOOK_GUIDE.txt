@@ -1,0 +1,558 @@
+Hello, humans.  This was and is a major pain point with this app so I had Claude produce this.
+
+
+Quick Look Extension Development Guide
+=======================================
+Hard-won lessons from building a QL preview extension for ePub, CBZ, CBR,
+PDF, Markdown, and plain text files across macOS, iOS, and visionOS.
+
+
+
+TABLE OF CONTENTS
+-----------------
+1. The two types of QL extensions
+2. Creating the extension target
+3. Info.plist configuration
+4. The principal class (and the conformance trap)
+5. UTType registration — the hardest part
+6. Competing apps and type resolution
+7. iOS system handlers and the interstitial panel
+8. Rendering previews (HTML, PDF, images)
+9. The cid: attachment trap for image-heavy content
+10. CSS and scrolling pitfalls
+11. macOS testing (qlmanage is broken)
+12. Deployment and registration
+13. Debugging and logging
+
+
+1. THE TWO TYPES OF QL EXTENSIONS
+----------------------------------
+
+Apple offers two QL extension APIs:
+
+  QLPreviewingController (view-based):
+    You provide a UIViewController/NSViewController. The system embeds your
+    view in the preview panel. Gives you full control, but you're responsible
+    for all rendering.
+
+  QLPreviewProvider (data-based):
+    You return a QLPreviewReply containing data (HTML, PDF, image, etc.) and
+    the system renders it. Simpler, and the HTML rendering path gives you
+    scrollable, interactive content for free.
+
+We use QLPreviewProvider with QLIsDataBasedPreview=true. This is the right
+choice for document types where you want scrollable content — the system
+handles the web view, scrolling, and resizing.
+
+Third-party QL extensions for ePub ARE possible. Don't let anyone (or any
+AI assistant) tell you otherwise. The system has no built-in ePub previewer,
+so there's nothing to compete with. You parse the ePub, extract chapters and
+images, build an HTML document, and return it as a QLPreviewReply. It works
+on both macOS and iOS.
+
+
+2. CREATING THE EXTENSION TARGET
+---------------------------------
+
+In Xcode: File > New > Target > Quick Look Preview Extension.
+
+This creates an appex bundle inside your app's PlugIns directory. The
+extension runs in its own process with its own sandbox. Key constraints:
+
+  - No WKWebView. The WebProcess helper crashes in the extension sandbox.
+    You have to render everything yourself (or use the system's built-in
+    HTML rendering via QLPreviewReply).
+
+  - No network access (by default).
+
+  - Limited memory. The system will kill your extension if it uses too much.
+    This matters for image-heavy content like comic books.
+
+  - The extension shares code with your app via source files or frameworks,
+    NOT by linking the app target. Add shared source files to both targets
+    or create a shared framework.
+
+
+3. INFO.PLIST CONFIGURATION
+----------------------------
+
+The extension's Info.plist needs these keys:
+
+  NSExtension:
+    NSExtensionPointIdentifier: com.apple.quicklook.preview
+    NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PreviewProvider
+    NSExtensionAttributes:
+      QLIsDataBasedPreview: true        (for QLPreviewProvider)
+      QLSupportedContentTypes: [...]    (array of UTType identifiers)
+      QLSupportsSearchableItems: false  (unless you need Spotlight indexing)
+
+NSExtensionPrincipalClass MUST be module-qualified. If your module is
+"raedad_look" and your class is "PreviewProvider", the value is
+"raedad_look.PreviewProvider". Get this wrong and the extension silently
+fails to load.
+
+QLSupportedContentTypes is the most important and most error-prone key.
+See section 5.
+
+
+4. THE PRINCIPAL CLASS (AND THE CONFORMANCE TRAP)
+--------------------------------------------------
+
+Here is the correct class declaration:
+
+    import QuickLook
+    #if os(macOS)
+    import QuickLookUI
+    #endif
+
+    class PreviewProvider: QLPreviewProvider, QLPreviewingController {
+        func providePreview(for request: QLFilePreviewRequest) async throws -> QLPreviewReply {
+            // ...
+        }
+    }
+
+The explicit QLPreviewingController conformance looks redundant — isn't
+QLPreviewProvider already a QLPreviewingController? No. Here's why:
+
+QLPreviewProvider's public Objective-C header does NOT declare conformance
+to the QLPreviewingController protocol. But the QuickLookUI runtime check
+for QLIsDataBasedPreview=true extensions calls:
+
+    conformsToProtocol:@protocol(QLPreviewingController)
+
+Not isKindOfClass. Without the explicit conformance declaration, the check
+fails and you get:
+
+    "The principal object does not implement the QLPreviewingController protocol"
+
+This error appears in the system log, not in Xcode's console. Your extension
+loads, does nothing, and you have no idea why. 
+
+Also: on macOS, you must import QuickLookUI (not just QuickLook). The
+QLPreviewingController protocol lives there. On iOS, it's in QuickLook.
+Use #if os(macOS) to guard the import.
+
+And use #if os(iOS), NOT #if canImport(UIKit). UIKit is importable on
+macOS (Apple Silicon), but actually using it in a macOS QL extension causes
+UIKit_PKSubsystem setup failures. The canImport check passes but the code
+breaks.
+
+
+5. UTTYPE REGISTRATION — THE HARDEST PART
+-------------------------------------------
+
+Getting types right is the single most frustrating aspect of QL extension
+development. There are multiple registration points that must all agree,
+and the behavior differs between macOS and iOS.
+
+You need to configure types in THREE places:
+
+A) UTExportedTypeDeclarations (app's Info.plist)
+   Defines types your app "owns." For custom formats like .cbz comics, you
+   create a type identifier (e.g. com.yourapp.cbz-archive) with:
+     - UTTypeIdentifier
+     - UTTypeDescription
+     - UTTypeConformsTo (what this type inherits from)
+     - UTTypeTagSpecification (file extensions and MIME types)
+
+B) CFBundleDocumentTypes (app's Info.plist)
+   Tells the system "I can open files of these types." Each entry has:
+     - LSItemContentTypes (which types)
+     - LSHandlerRank (Owner, Default, or Alternate)
+     - CFBundleTypeRole (Viewer, Editor, etc.)
+
+C) QLSupportedContentTypes (extension's Info.plist)
+   Tells the QL system which types your extension can preview.
+
+These three must work together. If your exported type doesn't match what the
+system resolves for a file extension, your QL extension never gets called.
+If your CFBundleDocumentTypes doesn't include the resolved type, your app
+doesn't appear in "Open With."
+
+
+6. COMPETING APPS AND TYPE RESOLUTION
+---------------------------------------
+
+This is where it gets genuinely painful.
+
+Multiple apps can export UTTypes for the same file extension. The system
+picks ONE winner per extension. You cannot control which app wins.
+
+Example: if another comic reader is installed and exports its own UTType
+for .cbz, the system might resolve .cbz to that app's type instead of
+yours. Your QL extension lists your type in QLSupportedContentTypes, but
+the file's actual type is the other app's identifier. No match. Your
+extension is never invoked.
+
+You can verify what type the system assigns:
+
+    swift -e 'import UniformTypeIdentifiers; print(UTType(filenameExtension: "cbz")!.identifier)'
+
+Or via Spotlight:
+
+    mdls -name kMDItemContentType somefile.cbz
+
+These can return DIFFERENT results. Swift uses LaunchServices resolution;
+mdls uses Spotlight's metadata indexer. The QL system uses LaunchServices.
+
+CRITICAL DISCOVERY: macOS Quick Look uses EXACT type matching for
+QLSupportedContentTypes, NOT conformance-based matching. We confirmed
+this through testing:
+
+  - A file with type "other.cbz-type" conforms to public.zip-archive
+  - Our extension lists public.zip-archive in QLSupportedContentTypes
+  - The conformance relationship is real (UTType.conforms(to:) returns true)
+  - But the QL system DOES NOT invoke our extension
+
+This means listing parent types like public.zip-archive in
+QLSupportedContentTypes does NOT help you match subtypes of that parent.
+QL only checks for exact identifier matches, not conformance. Parent
+types are still worth listing for cases where a file IS exactly
+public.zip-archive (rare, but possible for generic .zip files), but they
+won't catch subtypes exported by other apps.
+
+The practical consequence is bleak: if another app installs on the user's
+system and exports a UTType for .cbz or .cbr, your QL extension breaks
+for those files. The only fixes are:
+
+  Option A: Hard-code the competing app's type identifiers in your
+            QLSupportedContentTypes. This works but is fragile — you have
+            to know every possible competitor and update your list when
+            new ones appear. It's also ugly to have another app's reverse-
+            DNS identifiers in your Info.plist.
+
+  Option B: The user uninstalls the competing app. Once the competing type
+            export is gone, the system resolves the extension to your
+            exported type, which matches exactly. This is what actually
+            works in practice.
+
+  Option C: The user sets your app as the default handler AND the competing
+            app doesn't have its own QL extension. Setting the default
+            handler doesn't change type resolution, but it does affect which
+            QL extension the system prefers when multiple extensions match
+            the same type. However, if no extension matches the type at all
+            (the exact-match problem), being the default handler doesn't
+            help — you still get the generic fallback.
+
+We chose not to hard-code competing app type identifiers. It's a
+maintenance burden, it's fragile, and for any given user the set of
+installed competing apps is unknowable. Instead, we rely on our own
+exported types and accept that if a competing app's type export wins,
+our QL preview won't work until the user removes that app or it stops
+exporting a competing type.
+
+For the main app (opening files, not QL), there are additional defenses:
+
+  CFBundleDocumentTypes: claim parent types (public.zip-archive,
+  com.rarlab.rar-archive) with LSHandlerRank: Alternate. This ensures
+  you appear in the "Open With" menu regardless of type resolution.
+
+  readableContentTypes: dynamically resolve the type at runtime using
+  UTType(filenameExtension:) and add whatever the system returns. This
+  covers device-specific type resolution in SwiftUI's DocumentGroup.
+
+These defenses work for opening files because DocumentGroup and the
+"Open With" menu DO use conformance-based matching. It's only the QL
+extension system that uses exact matching.
+
+
+7. iOS SYSTEM HANDLERS AND THE INTERSTITIAL PANEL
+---------------------------------------------------
+
+iOS has built-in QL handlers for certain system types. These ALWAYS take
+priority over third-party QL extensions. The affected types include:
+
+  - public.zip-archive (and subtypes): system shows an archive browser
+  - public.plain-text (and subtypes): system shows unformatted text
+  - public.image (and subtypes): system shows an image viewer
+
+If your exported UTType conforms to one of these, your QL extension will
+never run on iOS. The system handler intercepts the preview.
+
+This is the cause of the "interstitial panel" problem on iPad: instead of
+seeing your rendered preview directly, the user sees a generic system panel
+with a button like "Preview Content" or "Open." Tapping the button might
+open the system's handler rather than yours. It's a terrible user experience
+and there's nothing you can do about it at runtime.
+
+The fix is at the type declaration level. Your exported types must conform
+ONLY to public.data — not to any more specific system type:
+
+    WRONG:
+    <key>UTTypeConformsTo</key>
+    <array>
+        <string>public.zip-archive</string>   <!-- system handler hijacks -->
+    </array>
+
+    RIGHT:
+    <key>UTTypeConformsTo</key>
+    <array>
+        <string>public.data</string>           <!-- no system handler for this -->
+    </array>
+
+This means your CBZ type won't technically be recognized as a ZIP archive
+by the system, but that's fine — your app handles the parsing internally.
+The tradeoff is that the system archive browser won't offer to open your
+files, but you get your own QL preview instead.
+
+This does NOT affect what you list in QLSupportedContentTypes. You can
+(and should) list public.zip-archive there for conformance matching.
+The iOS system handler issue is about your EXPORTED type's conformance,
+not what your QL extension claims to support.
+
+
+8. RENDERING PREVIEWS (HTML, PDF, IMAGES)
+------------------------------------------
+
+QLPreviewReply supports several content types:
+
+  HTML (.html):
+    Return HTML data. The system renders it in a web view. Supports CSS,
+    JavaScript (limited), and image references. This is the most flexible
+    option and gives you scrollable, interactive previews. Use this for
+    ePub chapters, Markdown, plain text, and comic pages.
+
+        let reply = QLPreviewReply(
+            dataOfContentType: .html,
+            contentSize: CGSize(width: 600, height: 800)
+        ) { replyToUpdate in
+            replyToUpdate.stringEncoding = .utf8
+            return htmlData
+        }
+
+    The contentSize is a hint for initial layout, not a hard constraint.
+    Content that exceeds this size will scroll.
+
+  PDF:
+    Return a PDFDocument. The system provides native PDF rendering with
+    page navigation.
+
+        let reply = QLPreviewReply(forPDFWithPageSize: pageSize) { _ in
+            return pdfDocument
+        }
+
+  Image:
+    Return image data directly. Simple but non-scrollable.
+
+For text-based formats (plain text, Markdown), build HTML and return it.
+You get proper font rendering, styling, and scrolling.
+
+For PDF, pass through to the system's PDF renderer. Don't try to render
+PDF pages as images — you'll lose text selection and zoom.
+
+
+9. THE CID: ATTACHMENT TRAP FOR IMAGE-HEAVY CONTENT
+-----------------------------------------------------
+
+QLPreviewReply supports cid: URL references for embedding images in HTML:
+
+    let attachment = QLPreviewReplyAttachment(data: imageData, contentType: .jpeg)
+    replyToUpdate.attachments["img-0"] = attachment
+    // In HTML: <img src="cid:img-0">
+
+This works well for ePub previews where you have text-heavy HTML with a
+few inline images (book covers, illustrations). The images are small and
+there aren't many of them.
+
+It FAILS SILENTLY for comic book previews.
+
+Comics are entirely images. A 10-page preview might have 10-30MB of image
+data across 10 attachments. The cid: mechanism chokes on this — the HTML
+renders but none of the images load. You get a blank page with no error
+message, no console output, nothing to indicate what went wrong.
+
+The fix: use inline base64 data: URIs for image-heavy content.
+
+    let base64 = imageData.base64EncodedString()
+    let html = "<img src=\"data:image/jpeg;base64,\(base64)\">"
+
+This embeds the image data directly in the HTML. It's less elegant and
+increases the HTML document size by ~33% (base64 overhead), but it works
+reliably.
+
+To keep memory usage reasonable:
+  - Limit the number of preview pages (we use 10)
+  - Downscale large images using ImageIO before base64-encoding:
+
+    import ImageIO
+
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceThumbnailMaxPixelSize: 1200,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+    ]
+    let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+
+  - Convert downscaled images to JPEG at 75% quality
+
+The rule: use cid: for a handful of small images in text-heavy content.
+Use data: URIs for image-heavy content. Don't mix them up or you'll spend
+days debugging blank previews.
+
+
+10. CSS AND SCROLLING PITFALLS
+-------------------------------
+
+HTML previews render in a system-managed web view. Certain CSS patterns
+can break scrolling or cause the preview to appear empty.
+
+What works (ePub-style):
+
+    body {
+        font-family: Georgia, serif;
+        font-size: 16px;
+        line-height: 1.6;
+        max-width: 700px;
+        margin: 20px auto;
+        padding: 0 20px;
+    }
+    img { max-width: 100%; height: auto; }
+
+What can cause problems:
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    This aggressive reset strips margin and padding from ALL elements,
+    including the html and body elements that the system's web view
+    container may rely on for layout.
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    This viewport tag is for mobile web pages. In a QL preview on macOS,
+    "device-width" has no useful meaning and can confuse the layout engine.
+
+For comic previews (full-width images on a dark background), this works:
+
+    body { margin: 0; padding: 0; background: #1c1c1e; }
+    .page img { display: block; width: 100%; height: auto; }
+
+Note: body { margin: 0 } is fine. * { margin: 0 } is risky.
+
+
+11. macOS TESTING (QLMANAGE IS BROKEN)
+---------------------------------------
+
+The standard way to test QL extensions is the qlmanage command:
+
+    qlmanage -p somefile.epub
+
+As of macOS 26, this is broken for QLPreviewProvider-based extensions. The
+qlmanage tool doesn't properly link QuickLookUI, so QLPreviewingController
+isn't available and the extension fails to load. This is an Apple bug.
+
+You MUST test via Finder:
+  1. Select the file in Finder
+  2. Press Space to invoke Quick Look
+  3. Verify the preview renders correctly
+
+The Console.app or `log` command can show QL-related messages:
+
+    log show --predicate 'eventMessage CONTAINS "principal object"' --last 30s --debug --info
+
+The "UIKit_PKSubsystem refused setup" message in logs is NORMAL on macOS.
+It appears because the QL system tries to initialize UIKit subsystems even
+on macOS. It's harmless — ignore it.
+
+
+12. DEPLOYMENT AND REGISTRATION
+---------------------------------
+
+After building, the system needs to know about your extension. The process:
+
+  1. Kill old extension processes:
+       killall YourApp_look
+
+  2. Copy the app to /Applications (or wherever it lives):
+       rm -rf /Applications/YourApp.app
+       cp -R Build/Products/Release/YourApp.app /Applications/
+
+  3. Register the extension:
+       pluginkit -a /Applications/YourApp.app/Contents/PlugIns/YourApp_look.appex
+
+  4. Reset the QL cache:
+       qlmanage -r
+
+  5. Optionally register with LaunchServices:
+       /System/Library/Frameworks/CoreServices.framework/.../lsregister -f -R /Applications/YourApp.app
+
+CRITICAL: Old copies of your app WILL shadow new copies. If you ever copied
+the app to ~/Applications, /Applications, or any other location, all copies
+have their QL extension registered. The system might invoke an old copy's
+extension instead of the new one. Hunt down and delete stale copies:
+
+    find / -name "YourApp.app" -type d 2>/dev/null
+
+    # Unregister old extensions:
+    pluginkit -r /path/to/old/YourApp.app/Contents/PlugIns/YourApp_look.appex
+
+    # Verify only one is registered:
+    pluginkit -mDvvv -p com.apple.quicklook.preview | grep -i yourapp
+
+This caused us days of confusion. We had a stale copy in ~/Applications
+that was intercepting Quick Look requests and showing outdated (broken)
+previews while we kept rebuilding and redeploying to /Applications.
+
+
+13. DEBUGGING AND LOGGING
+---------------------------
+
+QL extensions run out-of-process. Xcode's debugger can attach, but it's
+unreliable. Practical debugging approaches:
+
+  Console.app:
+    Filter by your extension's process name or bundle ID. Look for:
+    - "principal object does not implement" (conformance issue, section 4)
+    - "no preview for type" (type mismatch, section 5/6)
+    - crash reports (memory, sandbox violations)
+
+  os_log / Logger:
+    Add logging to your extension. Use os.log with a custom subsystem:
+
+        import os.log
+        let logger = Logger(subsystem: "com.yourapp.ql", category: "preview")
+        logger.info("Previewing \(ext) file, \(data.count) bytes")
+
+    View in Console.app or with:
+        log show --predicate 'subsystem == "com.yourapp.ql"' --last 1m
+
+  Crash logs:
+    ~/Library/Logs/DiagnosticReports/
+
+  Type resolution:
+    When debugging type mismatches, check what the system actually resolves:
+
+        swift -e 'import UniformTypeIdentifiers; print(UTType(filenameExtension: "cbz")!.identifier)'
+        mdls -name kMDItemContentType -name kMDItemContentTypeTree somefile.cbz
+
+    These can disagree. Swift/LaunchServices resolution is what matters for QL.
+
+
+SUMMARY OF GOTCHAS (QUICK REFERENCE)
+--------------------------------------
+
+1.  QLPreviewProvider needs explicit QLPreviewingController conformance.
+2.  Use #if os(iOS), not #if canImport(UIKit).
+3.  Exported types must conform to public.data only (not public.archive etc.)
+    or iOS system handlers will hijack your preview.
+4.  macOS QL uses EXACT type matching, not conformance. Listing a parent
+    type like public.zip-archive does NOT match subtypes of it. If another
+    app exports a competing type for your file extension, your QL extension
+    stops working for those files.
+5.  cid: image attachments fail silently for numerous/large images.
+    Use base64 data: URIs for image-heavy content (comics).
+6.  Aggressive CSS resets (* { margin: 0 }) and viewport meta tags can
+    break scrolling in the QL preview panel.
+7.  qlmanage -p is broken on macOS 26. Test via Finder (Space bar).
+8.  Stale app copies shadow new deployments. Delete old copies.
+    DerivedData builds count — they register QL extensions too.
+9.  QLSupportedContentTypes must match what the system ACTUALLY resolves
+    for a file extension, not just what you wish it would resolve to.
+10. macOS prefers the default handler's QL extension. But being the
+    default handler doesn't help if the type doesn't match — exact
+    match is required before handler preference matters.
+11. NSExtensionPrincipalClass must be module-qualified
+    (ModuleName.ClassName, not just ClassName).
+12. WKWebView cannot be used in QL extensions. The sandbox kills it.
+13. Third-party QL extensions for ePub, comics, etc. ARE possible.
+    The system has no built-in handlers for these formats. Don't let
+    anyone tell you it can't be done.
