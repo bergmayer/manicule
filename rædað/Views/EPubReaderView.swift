@@ -39,6 +39,7 @@ struct EPubReaderView: View {
     @State private var viewMode: ViewMode = .paginated
     @State private var twoUpOverride: Bool?
     @State private var viewWidth: CGFloat = 0
+    @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
     @State private var bookReady = false
@@ -78,7 +79,8 @@ struct EPubReaderView: View {
     }
 
     private var effectiveTwoUp: Bool {
-        isPaginated && twoUpOverride == true
+        guard isPaginated else { return false }
+        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
     private var activeMargins: MarginSettings {
@@ -128,7 +130,7 @@ struct EPubReaderView: View {
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp ?? ReaderHelpers.defaultTwoUpForOrientation()
+                twoUpOverride = eff.twoUp
                 let tempFile = bookTempURL
                 if !FileManager.default.fileExists(atPath: tempFile.path) {
                     try? rawData.write(to: tempFile)
@@ -224,6 +226,9 @@ struct EPubReaderView: View {
                     epubContent
                         .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                             viewWidth = newWidth
+                        }
+                        .onChange(of: geometry.size.height, initial: true) { _, newHeight in
+                            viewHeight = newHeight
                         }
                 }
             }
@@ -407,6 +412,7 @@ struct EPubReaderView: View {
 
         ToolbarItem(placement: .automatic) {
             Menu {
+                Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                 Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                 Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                 Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
@@ -476,6 +482,7 @@ struct EPubReaderView: View {
             Spacer()
             Menu {
                 Section {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
@@ -805,6 +812,20 @@ struct EPubReaderView: View {
     private func adjustFontSize(by delta: Double) {
         let newSize = max(12, min(36, readingPrefs.effective(for: fileHash).fontSize + delta))
         readingPrefs.updatePreference(for: fileHash, apply: { $0.fontSize = newSize }, applyGlobal: { readingPrefs.fontSize = newSize })
+    }
+
+    private func selectAutomatic() {
+        let wasScrolling = !isPaginated
+        viewMode = .paginated
+        twoUpOverride = nil
+        let resolvedTwoUp = ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
+        if wasScrolling { webViewProxy.setFlow?("paginated") }
+        webViewProxy.setColumnCount?(resolvedTwoUp ? 2 : 1)
+        let m = resolvedTwoUp ? readingPrefs.effective(for: fileHash).marginsTwoUp
+                              : readingPrefs.effective(for: fileHash).marginsOneUp
+        webViewProxy.setMargins?(m.topBottom, m.leftRight)
+        restoreCurrentPosition()
+        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
     }
 
     private func selectSinglePage() {

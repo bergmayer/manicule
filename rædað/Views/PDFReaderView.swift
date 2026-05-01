@@ -35,6 +35,7 @@ struct PDFReaderView: View {
     @State private var twoUpOverride: Bool? = nil
     @State private var zoomScale: Double? = nil
     @State private var viewWidth: CGFloat = 0
+    @State private var viewHeight: CGFloat = 0
 
     // Slider scrubbing state — defers page navigation until drag ends
     @State private var sliderDragging: Bool = false
@@ -76,7 +77,8 @@ struct PDFReaderView: View {
     }
 
     private var effectiveTwoUp: Bool {
-        isPaginated && twoUpOverride == true
+        guard isPaginated else { return false }
+        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
     var body: some View {
@@ -89,7 +91,7 @@ struct PDFReaderView: View {
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp ?? ReaderHelpers.defaultTwoUpForOrientation()
+                twoUpOverride = eff.twoUp
                 trimWhitespace = eff.trimWhitespace
                 loadDocument()
                 // Note: loadDocument() calls applyTrimCropBoxes() only when
@@ -201,6 +203,9 @@ struct PDFReaderView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                     viewWidth = newWidth
+                }
+                .onChange(of: geometry.size.height, initial: true) { _, newHeight in
+                    viewHeight = newHeight
                 }
             }
         }
@@ -337,6 +342,7 @@ struct PDFReaderView: View {
             Spacer()
             Menu {
                 Section {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
@@ -448,6 +454,7 @@ struct PDFReaderView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Section {
+                        Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                         Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                         Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                         Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
@@ -493,6 +500,7 @@ struct PDFReaderView: View {
 
             ToolbarItem(placement: .automatic) {
                 Menu {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
@@ -727,6 +735,12 @@ struct PDFReaderView: View {
                 keyRepeatCount = 0
             }
         }
+    }
+
+    private func selectAutomatic() {
+        viewMode = .paginated
+        twoUpOverride = nil
+        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
     }
 
     private func selectSinglePage() {

@@ -3,10 +3,23 @@ import SwiftUI
 /// Namespace for shared reader utility functions.
 enum ReaderHelpers {
 
-    // MARK: - iPad Orientation Default
+    // MARK: - Automatic Two-Up Resolution
 
-    /// Default two-up state based on device orientation.
-    /// iPad landscape = true (two-up), everything else = false (one-up).
+    /// Resolves the auto two-up state from the current view size.
+    /// iPhone always returns false (landscape too narrow). iPad/macOS/visionOS
+    /// return true when the available area is wider than tall. Falls back to
+    /// platform orientation when the view size is not yet known.
+    static func defaultTwoUp(viewWidth: CGFloat, viewHeight: CGFloat) -> Bool {
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone { return false }
+        #endif
+        guard viewWidth > 0, viewHeight > 0 else {
+            return defaultTwoUpForOrientation()
+        }
+        return viewWidth > viewHeight
+    }
+
+    /// Fallback used before the view size is known.
     static func defaultTwoUpForOrientation() -> Bool {
         #if os(iOS)
         guard let scene = UIApplication.shared.connectedScenes

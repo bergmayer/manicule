@@ -60,7 +60,8 @@ struct ComicReaderView: View {
     }
 
     private var effectiveTwoUp: Bool {
-        isPaginated && twoUpOverride == true
+        guard isPaginated else { return false }
+        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
     var body: some View {
@@ -69,7 +70,7 @@ struct ComicReaderView: View {
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp ?? ReaderHelpers.defaultTwoUpForOrientation()
+                twoUpOverride = eff.twoUp
                 trimWhitespace = eff.trimWhitespace
                 restorePosition()
             }
@@ -268,6 +269,7 @@ struct ComicReaderView: View {
             Spacer()
             Menu {
                 Section {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
@@ -652,6 +654,12 @@ struct ComicReaderView: View {
         }
     }
 
+    private func selectAutomatic() {
+        viewMode = .paginated
+        twoUpOverride = nil
+        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
+    }
+
     private func selectSinglePage() {
         viewMode = .paginated
         twoUpOverride = false
@@ -687,6 +695,7 @@ struct ComicReaderView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Section {
+                        Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                         Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                         Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                         Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
@@ -731,6 +740,7 @@ struct ComicReaderView: View {
 
             ToolbarItem(placement: .automatic) {
                 Menu {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }

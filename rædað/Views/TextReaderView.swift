@@ -30,6 +30,7 @@ struct TextReaderView: View {
     @State private var viewMode: ViewMode = .scrolling
     @State private var twoUpOverride: Bool? = nil
     @State private var viewWidth: CGFloat = 0
+    @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
     @State private var htmlFileURL: URL?
     @State private var htmlBaseURL: URL?
@@ -76,7 +77,8 @@ struct TextReaderView: View {
 
     /// Whether two-page spread should be active. Only in paginated mode.
     private var effectiveTwoUp: Bool {
-        isPaginated && twoUpOverride == true
+        guard isPaginated else { return false }
+        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
     private var isMarkdown: Bool {
@@ -193,7 +195,7 @@ struct TextReaderView: View {
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp ?? ReaderHelpers.defaultTwoUpForOrientation()
+                twoUpOverride = eff.twoUp
                 // Restore saved scroll fraction before WebView renders,
                 // so the initial WebViewContent gets the correct position.
                 if let hash = fileHash,
@@ -315,6 +317,9 @@ struct TextReaderView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                         viewWidth = newWidth
+                    }
+                    .onChange(of: geometry.size.height, initial: true) { _, newHeight in
+                        viewHeight = newHeight
                     }
                 }
             }
@@ -439,6 +444,7 @@ struct TextReaderView: View {
             Spacer()
             Menu {
                 Section {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
@@ -669,6 +675,7 @@ struct TextReaderView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Section {
+                        Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                         Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                         Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                         Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
@@ -731,6 +738,7 @@ struct TextReaderView: View {
 
             ToolbarItem(placement: .automatic) {
                 Menu {
+                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
                     Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
                     Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
                     Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
@@ -910,6 +918,12 @@ struct TextReaderView: View {
                 keyRepeatCount = 0
             }
         }
+    }
+
+    private func selectAutomatic() {
+        viewMode = .paginated
+        twoUpOverride = nil
+        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
     }
 
     private func selectSinglePage() {
