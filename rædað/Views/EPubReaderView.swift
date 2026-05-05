@@ -40,6 +40,7 @@ struct EPubReaderView: View {
     @State private var twoUpOverride: Bool?
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
+    @State private var twoUpLayoutTask: Task<Void, Never>?
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
     @State private var bookReady = false
@@ -109,10 +110,20 @@ struct EPubReaderView: View {
                 webViewProxy.setMargins?(newMargins.topBottom, newMargins.leftRight)
             }
             .onChange(of: effectiveTwoUp) { _, newValue in
-                webViewProxy.setColumnCount?(newValue ? 2 : 1)
-                let m = newValue ? readingPrefs.effective(for: fileHash).marginsTwoUp
-                                 : readingPrefs.effective(for: fileHash).marginsOneUp
-                webViewProxy.setMargins?(m.topBottom, m.leftRight)
+                // Defer the layout call so the WKWebView's frame settles after
+                // a rotation. Calling setColumnCount immediately races with
+                // foliate's own resize handler — text ends up cut off and the
+                // next page peeks in until another rotation re-syncs.
+                twoUpLayoutTask?.cancel()
+                twoUpLayoutTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    if Task.isCancelled { return }
+                    webViewProxy.setColumnCount?(newValue ? 2 : 1)
+                    let m = newValue ? readingPrefs.effective(for: fileHash).marginsTwoUp
+                                     : readingPrefs.effective(for: fileHash).marginsOneUp
+                    webViewProxy.setMargins?(m.topBottom, m.leftRight)
+                    restoreCurrentPosition()
+                }
             }
     }
 
