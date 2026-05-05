@@ -134,6 +134,17 @@ final class ReadingPreferences {
         }
     }
 
+    /// Sets the viewMode and twoUp preference together. Used by all four readers'
+    /// `select{Automatic,SinglePage,TwoPage,Scrolling}` methods so the boilerplate
+    /// of building per-book overrides vs. updating globals lives in one place.
+    func setViewMode(_ mode: ViewMode, twoUp: Bool?, for fileHash: String?) {
+        updatePreference(
+            for: fileHash,
+            apply: { $0.viewMode = mode; $0.twoUp = twoUp },
+            applyGlobal: { self.viewMode = mode }
+        )
+    }
+
     /// Persists current preferences. Both global defaults and per-book overrides
     /// go to UserDefaults (device-local). Reading settings are intentionally NOT
     /// synced — each device can have its own view mode, font size, etc. Bookmarks

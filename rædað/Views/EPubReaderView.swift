@@ -50,9 +50,7 @@ struct EPubReaderView: View {
     @State private var bridgeReady = false
     @State private var bookReady = false
 
-    // Key repeat quick vanish state
-    @State private var keyRepeatCount: Int = 0
-    @State private var fastScrollTimer: Timer?
+    @State private var fastScroll = FastScrollController()
 
     // Read-aloud state (iOS only)
     #if os(iOS) || os(visionOS)
@@ -143,6 +141,7 @@ struct EPubReaderView: View {
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
                 twoUpOverride = eff.twoUp
+                wireFastScrollAnimationSuppression()
                 let tempFile = bookTempURL
                 if !FileManager.default.fileExists(atPath: tempFile.path) {
                     try? rawData.write(to: tempFile)
@@ -160,39 +159,27 @@ struct EPubReaderView: View {
     @ViewBuilder
     private var epubLayoutWithNotifications: some View {
         epubLayout
+            .readerCommands(ReaderCommandHandlers(
+                onToggleViewMode: { if isPaginated { selectScrolling() } else { selectSinglePage() } },
+                onBookmark: toggleBookmark,
+                onShowSavedPositions: { showBookmarks = true },
+                onShowReadingSettings: { showSettings = true },
+                onToggleSearch: {
+                    showSearch.toggle()
+                    if !showSearch { dismissSearch() }
+                },
+                onToggleImmersive: { showChrome.toggle() },
+                onZoomIn: { adjustFontSize(by: 1) },
+                onZoomOut: { adjustFontSize(by: -1) }
+            ))
             .onReceive(NotificationCenter.default.publisher(for: .toggleTableOfContents)) { _ in
                 withAnimation { showTOC.toggle() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .showReadingSettings)) { _ in
-                showSettings = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .bookmarkPosition)) { _ in
-                toggleBookmark()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleViewMode)) { _ in
-                if isPaginated { selectScrolling() } else { selectSinglePage() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .zoomIn)) { _ in
-                adjustFontSize(by: 1)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .zoomOut)) { _ in
-                adjustFontSize(by: -1)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleImmersive)) { _ in
-                showChrome.toggle()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .showSavedPositions)) { _ in
-                showBookmarks = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .nextChapter)) { _ in
                 goToNextChapter()
             }
             .onReceive(NotificationCenter.default.publisher(for: .previousChapter)) { _ in
                 goToPreviousChapter()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleSearch)) { _ in
-                showSearch.toggle()
-                if !showSearch { dismissSearch() }
             }
             #if os(iOS) || os(visionOS)
             .onReceive(NotificationCenter.default.publisher(for: .toggleReadAloud)) { _ in
@@ -234,27 +221,20 @@ struct EPubReaderView: View {
                     .transition(.move(edge: .leading))
                     Divider()
                 }
-                GeometryReader { geometry in
-                    epubContent
-                        .onChange(of: geometry.size.width, initial: true) { _, newWidth in
-                            viewWidth = newWidth
-                        }
-                        .onChange(of: geometry.size.height, initial: true) { _, newHeight in
-                            viewHeight = newHeight
-                        }
-                }
+                epubContent
+                    .trackViewportSize(width: $viewWidth, height: $viewHeight)
             }
         }
         .navigationTitle(book.metadata.title)
         .focusable()
         .focusEffectDisabled()
         .onKeyPress(.leftArrow, phases: [.down, .repeat]) { event in
-            handleKeyRepeat(event.phase)
+            fastScroll.handle(phase: event.phase)
             goBack()
             return .handled
         }
         .onKeyPress(.rightArrow, phases: [.down, .repeat]) { event in
-            handleKeyRepeat(event.phase)
+            fastScroll.handle(phase: event.phase)
             goForward()
             return .handled
         }
@@ -285,16 +265,11 @@ struct EPubReaderView: View {
         }
         #endif
         .preferredColorScheme(readingPrefs.effective(for: fileHash).theme.preferredColorScheme)
-        .onKeyPress(.escape) {
-            if showSearch { dismissSearch(); return .handled }
-            #if os(iOS)
-            if !showChrome {
-                showChrome = true
-                return .handled
-            }
-            #endif
-            return .ignored
-        }
+        .escapeDismisses(
+            searchShowing: { showSearch },
+            dismissSearch: dismissSearch,
+            showChrome: $showChrome
+        )
         .overlay(alignment: .top) {
             if showSearch {
                 SearchBarView(
@@ -424,10 +399,12 @@ struct EPubReaderView: View {
 
         ToolbarItem(placement: .automatic) {
             Menu {
-                Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
-                Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
-                Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
-                Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
+                ViewModeMenuButtons(
+                    onAutomatic: selectAutomatic,
+                    onSinglePage: selectSinglePage,
+                    onTwoPage: selectTwoPage,
+                    onScrolling: selectScrolling
+                )
             } label: {
                 Label("View Mode", systemImage: currentModeIcon)
             }
@@ -494,10 +471,12 @@ struct EPubReaderView: View {
             Spacer()
             Menu {
                 Section {
-                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
-                    Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
-                    Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
-                    Button { selectScrolling() } label: { Label("Scrolling", systemImage: "scroll") }
+                    ViewModeMenuButtons(
+                        onAutomatic: selectAutomatic,
+                        onSinglePage: selectSinglePage,
+                        onTwoPage: selectTwoPage,
+                        onScrolling: selectScrolling
+                    )
                 }
                 Section {
                     if !book.tableOfContents.isEmpty {
@@ -706,29 +685,17 @@ struct EPubReaderView: View {
         webViewProxy.clearSearch?()
     }
 
-    // MARK: - Key repeat quick vanish
-
-    // ePub-specific: foliate-js animates page turns, which becomes visually
-    // noisy when the user holds an arrow key. After 4 rapid repeats we ask
-    // the bridge to skip animation, then re-enable on the timer reset. The
-    // other readers don't need this — PDF/Comic image swaps are instant and
-    // text-reader page turns animate via raedad.js's own velocity damping.
-    private func handleKeyRepeat(_ phase: KeyPress.Phases) {
-        if phase == .down {
-            keyRepeatCount = 0
-        }
-        keyRepeatCount += 1
-        if keyRepeatCount == 4 {
-            webViewProxy.setAnimated?(false)
-        }
-        resetFastScrollTimer()
-    }
-
-    private func resetFastScrollTimer() {
-        fastScrollTimer?.invalidate()
-        fastScrollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
-            Task { @MainActor in
-                keyRepeatCount = 0
+    // ePub-specific fast-scroll behavior: foliate-js animates page turns, which
+    // becomes visually noisy when the user holds an arrow key. After 4 rapid
+    // repeats we ask the bridge to skip animation; on the run reset (count → 0)
+    // we re-enable. The other readers don't need this — PDF/Comic image swaps
+    // are instant and text-reader page turns animate via raedad.js's own
+    // velocity damping. Wired here so FastScrollController stays format-agnostic.
+    private func wireFastScrollAnimationSuppression() {
+        fastScroll.onCountChanged = { [webViewProxy] count in
+            if count == 4 {
+                webViewProxy.setAnimated?(false)
+            } else if count == 0 {
                 webViewProxy.setAnimated?(true)
             }
         }
@@ -850,7 +817,7 @@ struct EPubReaderView: View {
         if wasScrolling { webViewProxy.setFlow?("paginated") }
         webViewProxy.setColumnCount?(ReaderHelpers.resolveColumnCountForBridge(nil))
         restoreCurrentPosition()
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
+        readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
@@ -860,7 +827,7 @@ struct EPubReaderView: View {
         if wasScrolling { webViewProxy.setFlow?("paginated") }
         webViewProxy.setColumnCount?(1)
         restoreCurrentPosition()
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = false }, applyGlobal: { readingPrefs.viewMode = .paginated })
+        readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
     private func selectTwoPage() {
@@ -870,14 +837,14 @@ struct EPubReaderView: View {
         if wasScrolling { webViewProxy.setFlow?("paginated") }
         webViewProxy.setColumnCount?(2)
         restoreCurrentPosition()
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = true }, applyGlobal: { readingPrefs.viewMode = .paginated })
+        readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
     private func selectScrolling() {
         viewMode = .scrolling
         webViewProxy.setFlow?("scrolled")
         restoreCurrentPosition()
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .scrolling; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .scrolling })
+        readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 
     /// Restore reading position after a mode switch (scroll/1-up/2-up).

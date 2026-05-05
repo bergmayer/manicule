@@ -41,9 +41,7 @@ struct PDFReaderView: View {
     @State private var sliderDragging: Bool = false
     @State private var sliderPageIndex: Int = 0
 
-    // Key repeat quick vanish state
-    @State private var keyRepeatCount: Int = 0
-    @State private var fastScrollTimer: Timer?
+    @State private var fastScroll = FastScrollController()
 
     // Search state
     @State private var showSearch = false
@@ -102,33 +100,21 @@ struct PDFReaderView: View {
             .onDisappear {
                 autoSavePosition()
             }
+            .readerCommands(ReaderCommandHandlers(
+                onToggleViewMode: { if isPaginated { selectScrolling() } else { selectSinglePage() } },
+                onBookmark: toggleBookmark,
+                onShowSavedPositions: { showBookmarks = true },
+                onShowReadingSettings: { showSettings = true },
+                onToggleSearch: {
+                    showSearch.toggle()
+                    if !showSearch { dismissPdfSearch() }
+                },
+                onToggleImmersive: { showChrome.toggle() },
+                onZoomIn: { zoomScale = min(4.0, (zoomScale ?? 1.0) * 1.25) },
+                onZoomOut: { zoomScale = max(0.25, (zoomScale ?? 1.0) / 1.25) }
+            ))
             .onReceive(NotificationCenter.default.publisher(for: .showGoToPage)) { _ in
                 showGoToPage = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .bookmarkPosition)) { _ in
-                toggleBookmark()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleViewMode)) { _ in
-                if isPaginated { selectScrolling() } else { selectSinglePage() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .zoomIn)) { _ in
-                zoomScale = min(4.0, (zoomScale ?? 1.0) * 1.25)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .zoomOut)) { _ in
-                zoomScale = max(0.25, (zoomScale ?? 1.0) / 1.25)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .showReadingSettings)) { _ in
-                showSettings = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleImmersive)) { _ in
-                showChrome.toggle()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .showSavedPositions)) { _ in
-                showBookmarks = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleSearch)) { _ in
-                showSearch.toggle()
-                if !showSearch { dismissPdfSearch() }
             }
             .onChange(of: searchQuery) { _, newQuery in
                 performPdfSearch(newQuery)
@@ -181,57 +167,48 @@ struct PDFReaderView: View {
                 Divider()
             }
 
-            GeometryReader { geometry in
-                Group {
-                    if let doc = pdfDocument {
-                        pdfContentView(doc: doc)
-                            .overlay(alignment: .topTrailing) {
-                                if bookmarkedPdfPages.contains(currentPageIndex) {
-                                    Image(systemName: "bookmark.fill")
-                                        .font(.title2)
-                                        .foregroundStyle(.red)
-                                        .shadow(color: .black.opacity(0.3), radius: 2)
-                                        .padding(12)
-                                }
+            Group {
+                if let doc = pdfDocument {
+                    pdfContentView(doc: doc)
+                        .overlay(alignment: .topTrailing) {
+                            if bookmarkedPdfPages.contains(currentPageIndex) {
+                                Image(systemName: "bookmark.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(.red)
+                                    .shadow(color: .black.opacity(0.3), radius: 2)
+                                    .padding(12)
                             }
-                    } else if didAttemptLoad {
-                        ContentUnavailableView("Unable to Load PDF",
-                            systemImage: "doc.fill",
-                            description: Text("The PDF file could not be opened."))
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onChange(of: geometry.size.width, initial: true) { _, newWidth in
-                    viewWidth = newWidth
-                }
-                .onChange(of: geometry.size.height, initial: true) { _, newHeight in
-                    viewHeight = newHeight
+                        }
+                } else if didAttemptLoad {
+                    ContentUnavailableView("Unable to Load PDF",
+                        systemImage: "doc.fill",
+                        description: Text("The PDF file could not be opened."))
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .trackViewportSize(width: $viewWidth, height: $viewHeight)
         }
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
         .onKeyPress(.leftArrow, phases: [.down, .repeat]) { event in
-            handleKeyRepeat(event.phase)
+            fastScroll.handle(phase: event.phase)
             previousPage()
             return .handled
         }
         .onKeyPress(.rightArrow, phases: [.down, .repeat]) { event in
-            handleKeyRepeat(event.phase)
+            fastScroll.handle(phase: event.phase)
             nextPage()
             return .handled
         }
         .onChange(of: showChrome) { _, _ in
             isFocused = true
         }
-        .onKeyPress(.escape) {
-            if showSearch { dismissPdfSearch(); return .handled }
-            #if os(iOS)
-            if !showChrome { showChrome = true; return .handled }
-            #endif
-            return .ignored
-        }
+        .escapeDismisses(
+            searchShowing: { showSearch },
+            dismissSearch: dismissPdfSearch,
+            showChrome: $showChrome
+        )
         .background(Color.white.ignoresSafeArea())
         .overlay(alignment: .top) {
             if showSearch {
@@ -345,10 +322,13 @@ struct PDFReaderView: View {
             Spacer()
             Menu {
                 Section {
-                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
-                    Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
-                    Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
-                    Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
+                    ViewModeMenuButtons(
+                        onAutomatic: selectAutomatic,
+                        onSinglePage: selectSinglePage,
+                        onTwoPage: selectTwoPage,
+                        onScrolling: selectScrolling,
+                        scrollingLabel: "Continuous Scroll"
+                    )
                 }
                 Section {
                     Button { toggleTrim() } label: {
@@ -457,10 +437,13 @@ struct PDFReaderView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Section {
-                        Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
-                        Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
-                        Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
-                        Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
+                        ViewModeMenuButtons(
+                            onAutomatic: selectAutomatic,
+                            onSinglePage: selectSinglePage,
+                            onTwoPage: selectTwoPage,
+                            onScrolling: selectScrolling,
+                            scrollingLabel: "Continuous Scroll"
+                        )
                     }
                     Section {
                         Button { toggleTrim() } label: {
@@ -503,10 +486,13 @@ struct PDFReaderView: View {
 
             ToolbarItem(placement: .automatic) {
                 Menu {
-                    Button { selectAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
-                    Button { selectSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
-                    Button { selectTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
-                    Button { selectScrolling() } label: { Label("Continuous Scroll", systemImage: "scroll") }
+                    ViewModeMenuButtons(
+                        onAutomatic: selectAutomatic,
+                        onSinglePage: selectSinglePage,
+                        onTwoPage: selectTwoPage,
+                        onScrolling: selectScrolling,
+                        scrollingLabel: "Continuous Scroll"
+                    )
                 } label: {
                     Label("View Mode", systemImage: currentModeIcon)
                 }
@@ -724,46 +710,28 @@ struct PDFReaderView: View {
         bookmarkStore.savePosition(position, for: url, data: data)
     }
 
-    // MARK: - Key repeat quick vanish
-
-    private func handleKeyRepeat(_ phase: KeyPress.Phases) {
-        if phase == .down {
-            keyRepeatCount = 0
-        }
-        keyRepeatCount += 1
-        resetFastScrollTimer()
-    }
-
-    private func resetFastScrollTimer() {
-        fastScrollTimer?.invalidate()
-        fastScrollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
-            Task { @MainActor in
-                keyRepeatCount = 0
-            }
-        }
-    }
 
     private func selectAutomatic() {
         viewMode = .paginated
         twoUpOverride = nil
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
+        readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
         viewMode = .paginated
         twoUpOverride = false
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = false }, applyGlobal: { readingPrefs.viewMode = .paginated })
+        readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
     private func selectTwoPage() {
         viewMode = .paginated
         twoUpOverride = true
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = true }, applyGlobal: { readingPrefs.viewMode = .paginated })
+        readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
     private func selectScrolling() {
         viewMode = .scrolling
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .scrolling; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .scrolling })
+        readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 
     private func toggleTrim() {
