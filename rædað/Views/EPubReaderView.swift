@@ -40,7 +40,6 @@ struct EPubReaderView: View {
     @State private var twoUpOverride: Bool?
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
-    @State private var twoUpLayoutTask: Task<Void, Never>?
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
     @State private var bookReady = false
@@ -108,22 +107,6 @@ struct EPubReaderView: View {
             }
             .onChange(of: activeMargins) { _, newMargins in
                 webViewProxy.setMargins?(newMargins.topBottom, newMargins.leftRight)
-            }
-            .onChange(of: effectiveTwoUp) { _, newValue in
-                // Defer the layout call so the WKWebView's frame settles after
-                // a rotation. Calling setColumnCount immediately races with
-                // foliate's own resize handler — text ends up cut off and the
-                // next page peeks in until another rotation re-syncs.
-                twoUpLayoutTask?.cancel()
-                twoUpLayoutTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(350))
-                    if Task.isCancelled { return }
-                    webViewProxy.setColumnCount?(newValue ? 2 : 1)
-                    let m = newValue ? readingPrefs.effective(for: fileHash).marginsTwoUp
-                                     : readingPrefs.effective(for: fileHash).marginsOneUp
-                    webViewProxy.setMargins?(m.topBottom, m.leftRight)
-                    restoreCurrentPosition()
-                }
             }
     }
 
@@ -603,7 +586,14 @@ struct EPubReaderView: View {
         let flow = isPaginated ? "paginated" : "scrolled"
         let css = effective.foliateCSS
         let margins = activeMargins
-        let cols = effectiveTwoUp ? 2 : nil as Int?
+        // nil = 'auto' (foliate handles orientation internally),
+        // 1 / 2 force a fixed column count.
+        let cols: Int?
+        if let override = twoUpOverride {
+            cols = override ? 2 : 1
+        } else {
+            cols = nil
+        }
 
         // Load position for restoration: auto-saved position first, then manual bookmarks
         let lastCFI: String?
@@ -829,11 +819,11 @@ struct EPubReaderView: View {
         let wasScrolling = !isPaginated
         viewMode = .paginated
         twoUpOverride = nil
-        let resolvedTwoUp = ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
         if wasScrolling { webViewProxy.setFlow?("paginated") }
-        webViewProxy.setColumnCount?(resolvedTwoUp ? 2 : 1)
-        let m = resolvedTwoUp ? readingPrefs.effective(for: fileHash).marginsTwoUp
-                              : readingPrefs.effective(for: fileHash).marginsOneUp
+        // nil = 'auto' — foliate resolves columns from orientation and
+        // re-resolves on every resize, so rotation just works.
+        webViewProxy.setColumnCount?(nil)
+        let m = activeMargins
         webViewProxy.setMargins?(m.topBottom, m.leftRight)
         restoreCurrentPosition()
         readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })

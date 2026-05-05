@@ -207,7 +207,9 @@ final class WebViewProxy {
     var goToFraction: ((Double) -> Void)?
     var setFlow: ((String) -> Void)?           // "paginated" or "scrolled"
     var setStyles: ((String) -> Void)?
-    var setColumnCount: ((Int) -> Void)?
+    /// Sets the foliate paginator column preference: nil = auto (orientation-driven,
+    /// foliate re-resolves on resize), 1 = force single page, 2 = force two-up.
+    var setColumnCount: ((Int?) -> Void)?
     var setMargins: ((Double, Double) -> Void)?
     var nextSection: (() -> Void)?               // ePub: go to next chapter/section
     var previousSection: (() -> Void)?            // ePub: go to previous chapter/section
@@ -1797,8 +1799,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         webView?.evaluateJavaScript("window.bridge?.setStyles(`\(escaped)`);")
     }
 
-    func bridgeSetColumnCount(_ count: Int) {
-        webView?.evaluateJavaScript("window.bridge?.setColumnCount(\(count));")
+    func bridgeSetColumnCount(_ count: Int?) {
+        let arg = count.map(String.init) ?? "'auto'"
+        webView?.evaluateJavaScript("window.bridge?.setColumnCount(\(arg));")
     }
 
     func bridgeSetMargins(topBottom: Double, leftRight: Double) {
@@ -1899,12 +1902,10 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "`", with: "\\`")
             .replacingOccurrences(of: "$", with: "\\$")
-        let colJS: String
-        if let count = maxColumnCount {
-            colJS = "window.bridge.setColumnCount(\(count));"
-        } else {
-            colJS = ""
-        }
+        // maxColumnCount: nil = 'auto' (foliate resolves from orientation and
+        // re-resolves on resize), Int = force that fixed value.
+        let colArg = maxColumnCount.map(String.init) ?? "'auto'"
+        let colJS = "window.bridge.setColumnCount(\(colArg));"
         let marginJS: String
         if let tb = marginTB, let lr = marginLR {
             marginJS = "window.bridge.setMargins(\(Int(tb)), \(Int(lr)));"

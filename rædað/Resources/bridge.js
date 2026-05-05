@@ -21,6 +21,9 @@ document.body.append(view)
 // Track current state
 let currentFlow = 'paginated'
 let lastMarginPx = 0
+// columnPreference is the user's choice: 'auto' (orientation-driven), 1, or 2.
+// currentColumnCount is the resolved value foliate is currently rendering.
+let columnPreference = 'auto'
 let currentColumnCount = 1
 
 // Read-aloud state
@@ -178,6 +181,26 @@ function updateMaxInlineSize() {
     }
 }
 
+function resolveColumnCount() {
+    if (columnPreference !== 'auto') return columnPreference
+    const rect = view.renderer?.getBoundingClientRect()
+    const w = rect?.width || window.innerWidth
+    const h = rect?.height || window.innerHeight
+    return (w > 0 && h > 0 && w > h) ? 2 : 1
+}
+
+// Apply the resolved column count to the renderer and update inline size.
+// In 'auto' mode, this is called on every resize so rotation flips columns
+// without Swift having to orchestrate the change.
+function applyResolvedColumnCount() {
+    const n = resolveColumnCount()
+    currentColumnCount = n
+    if (view.renderer) {
+        view.renderer.setAttribute('max-column-count', String(n))
+    }
+    updateMaxInlineSize()
+}
+
 window.addEventListener('resize', () => {
     // Set the center text as the paginator anchor so after reflow it shows
     // the page containing this text rather than defaulting to top-of-viewport.
@@ -187,7 +210,7 @@ window.addEventListener('resize', () => {
     if (lastMarginPx > 0) {
         requestAnimationFrame(() => applyMarginGap())
     }
-    requestAnimationFrame(() => updateMaxInlineSize())
+    requestAnimationFrame(() => applyResolvedColumnCount())
 })
 
 // --- Event forwarding ---
@@ -953,10 +976,7 @@ window.bridge = {
             if (view.renderer) {
                 view.renderer.setAttribute('animated', '')
                 view.renderer.setAttribute('max-block-size', '10000px')
-                if (currentColumnCount > 1) {
-                    view.renderer.setAttribute('max-column-count', String(currentColumnCount))
-                }
-                updateMaxInlineSize()
+                applyResolvedColumnCount()
             }
         } catch (e) {
             console.error('bridge.init failed:', e)
@@ -1012,15 +1032,20 @@ window.bridge = {
     },
 
     setColumnCount(n) {
-        currentColumnCount = n
-        if (view.renderer) {
-            // setAttribute triggers attributeChangedCallback in paginator.js,
-            // which sets --_max-column-count, --_max-column-count-portrait, and
-            // --_max-column-count-spread on #top (closed shadow root, so we
-            // can't access #top from outside — the override must happen inside).
-            view.renderer.setAttribute('max-column-count', String(n))
-            updateMaxInlineSize()
+        // 'auto' resolves to 1 or 2 from viewport orientation and re-resolves
+        // on every resize. 1 / 2 force a fixed value. The renderer's
+        // attributeChangedCallback in paginator.js sets --_max-column-count,
+        // --_max-column-count-portrait, and --_max-column-count-spread on
+        // #top (closed shadow root, so we can't write those CSS vars from
+        // here directly — the override has to flow through the attribute).
+        if (n === 'auto') {
+            columnPreference = 'auto'
+        } else {
+            const num = Number(n)
+            if (num !== 1 && num !== 2) return
+            columnPreference = num
         }
+        applyResolvedColumnCount()
     },
 
     setGap(value) {
