@@ -67,10 +67,6 @@ struct TextReaderView: View {
         readingPrefs.effective(for: fileHash)
     }
 
-    private var activeMargins: MarginSettings {
-        effectiveTwoUp ? effective.marginsTwoUp : effective.marginsOneUp
-    }
-
     private var isPaginated: Bool {
         viewMode == .paginated
     }
@@ -294,9 +290,9 @@ struct TextReaderView: View {
                                     fragment: nil,
                                     cssOverride: effective.cssString,
                                     paginated: isPaginated,
-                                    twoUp: isPaginated ? twoUpOverride : nil,
-                                    marginTopBottom: activeMargins.topBottom,
-                                    marginLeftRight: activeMargins.leftRight
+                                    twoUp: isPaginated ? ReaderHelpers.resolveTwoUpForBridge(twoUpOverride) : nil,
+                                    marginsOneUp: effective.marginsOneUp,
+                                    marginsTwoUp: effective.marginsTwoUp
                                 ),
                                 proxy: webViewProxy,
                                 onScrollPositionChange: { fraction in

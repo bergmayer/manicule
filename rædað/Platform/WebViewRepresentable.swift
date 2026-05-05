@@ -20,8 +20,11 @@ struct WebViewContent: Equatable {
     var twoUp: Bool? = nil        // nil = auto, true/false = manual override
     var isEPub: Bool = false      // true = foliate-js ePub mode
     var bookFileURL: URL? = nil   // EPUB file URL for scheme handler (ePub mode only)
-    var marginTopBottom: Double? = nil  // top/bottom margin in px (text reader paginated mode)
-    var marginLeftRight: Double? = nil  // left/right margin in px (text reader paginated mode)
+    // Text reader paginated mode: both margin pairs are sent so the JS bridge
+    // can pick the right one based on its resolved column count and re-pick
+    // when the layout flips on rotation, without a Swift round trip.
+    var marginsOneUp: MarginSettings? = nil
+    var marginsTwoUp: MarginSettings? = nil
 
     static func == (lhs: WebViewContent, rhs: WebViewContent) -> Bool {
         if lhs.isEPub != rhs.isEPub { return false }
@@ -202,7 +205,10 @@ final class WebViewProxy {
     // ePub bridge methods
     var openBook: (() -> Void)?                // trigger book opening in foliate-js
     var initBook: ((String?) -> Void)?         // initialize with optional last CFI
-    var openAndInit: ((_ flow: String, _ css: String, _ marginTB: Double?, _ marginLR: Double?, _ maxColumnCount: Int?, _ lastLocation: String?) -> Void)?
+    var openAndInit: ((_ flow: String, _ css: String,
+                       _ oneUpTB: Double, _ oneUpLR: Double,
+                       _ twoUpTB: Double, _ twoUpLR: Double,
+                       _ maxColumnCount: Int?, _ lastLocation: String?) -> Void)?
     var goTo: ((String) -> Void)?              // CFI or href
     var goToFraction: ((Double) -> Void)?
     var setFlow: ((String) -> Void)?           // "paginated" or "scrolled"
@@ -210,7 +216,14 @@ final class WebViewProxy {
     /// Sets the foliate paginator column preference: nil = auto (orientation-driven,
     /// foliate re-resolves on resize), 1 = force single page, 2 = force two-up.
     var setColumnCount: ((Int?) -> Void)?
+    /// Single-pair setter (legacy). Applies the same margins to both layouts.
+    /// New callers should use `setMarginsBoth` so the bridge can pick the
+    /// right pair when the resolved column count flips on rotation.
     var setMargins: ((Double, Double) -> Void)?
+    /// Sends both margin pairs at once. The bridge stores both and picks
+    /// one-up vs two-up automatically based on its resolved column count.
+    /// Args: (oneUpTopBottom, oneUpLeftRight, twoUpTopBottom, twoUpLeftRight).
+    var setMarginsBoth: ((Double, Double, Double, Double) -> Void)?
     var nextSection: (() -> Void)?               // ePub: go to next chapter/section
     var previousSection: (() -> Void)?            // ePub: go to previous chapter/section
     var goToPage: ((Int) -> Void)?              // text reader paginated: go to page index (animated)
@@ -330,19 +343,19 @@ struct WebViewRepresentable: NSViewRepresentable {
 
             if coord.currentFileURL != content.fileURL || paginatedChanged {
                 coord.currentFileURL = content.fileURL
-                coord.currentMarginTB = content.marginTopBottom
-                coord.currentMarginLR = content.marginLeftRight
+                coord.currentMarginsOneUp = content.marginsOneUp
+                coord.currentMarginsTwoUp = content.marginsTwoUp
                 coord.currentTwoUp = content.twoUp
                 nsView.load(URLRequest(url: content.schemeURL))
             } else if coord.currentCSS != content.cssOverride {
                 coord.injectCSS(into: nsView)
             }
 
-            if coord.currentMarginTB != content.marginTopBottom || coord.currentMarginLR != content.marginLeftRight,
-               let tb = content.marginTopBottom, let lr = content.marginLeftRight {
-                coord.currentMarginTB = tb
-                coord.currentMarginLR = lr
-                coord.textReaderSetMargins(topBottom: tb, leftRight: lr)
+            if coord.currentMarginsOneUp != content.marginsOneUp || coord.currentMarginsTwoUp != content.marginsTwoUp,
+               let one = content.marginsOneUp, let two = content.marginsTwoUp {
+                coord.currentMarginsOneUp = one
+                coord.currentMarginsTwoUp = two
+                coord.textReaderSetMarginsBoth(one: one, two: two)
             }
 
             if coord.currentTwoUp != content.twoUp {
@@ -522,19 +535,19 @@ struct WebViewRepresentable: UIViewRepresentable {
 
             if coord.currentFileURL != content.fileURL || paginatedChanged {
                 coord.currentFileURL = content.fileURL
-                coord.currentMarginTB = content.marginTopBottom
-                coord.currentMarginLR = content.marginLeftRight
+                coord.currentMarginsOneUp = content.marginsOneUp
+                coord.currentMarginsTwoUp = content.marginsTwoUp
                 coord.currentTwoUp = content.twoUp
                 uiView.load(URLRequest(url: content.schemeURL))
             } else if coord.currentCSS != content.cssOverride {
                 coord.injectCSS(into: uiView)
             }
 
-            if coord.currentMarginTB != content.marginTopBottom || coord.currentMarginLR != content.marginLeftRight,
-               let tb = content.marginTopBottom, let lr = content.marginLeftRight {
-                coord.currentMarginTB = tb
-                coord.currentMarginLR = lr
-                coord.textReaderSetMargins(topBottom: tb, leftRight: lr)
+            if coord.currentMarginsOneUp != content.marginsOneUp || coord.currentMarginsTwoUp != content.marginsTwoUp,
+               let one = content.marginsOneUp, let two = content.marginsTwoUp {
+                coord.currentMarginsOneUp = one
+                coord.currentMarginsTwoUp = two
+                coord.textReaderSetMarginsBoth(one: one, two: two)
             }
 
             if coord.currentTwoUp != content.twoUp {
@@ -577,8 +590,11 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         proxy?.previousPage = { [weak self] in self?.previousPage() }
         proxy?.openBook = { [weak self] in self?.bridgeOpenBook() }
         proxy?.initBook = { [weak self] cfi in self?.bridgeInit(lastLocation: cfi) }
-        proxy?.openAndInit = { [weak self] flow, css, marginTB, marginLR, cols, loc in
-            self?.bridgeOpenAndInit(flow: flow, css: css, marginTB: marginTB, marginLR: marginLR, maxColumnCount: cols, lastLocation: loc)
+        proxy?.openAndInit = { [weak self] flow, css, oneTB, oneLR, twoTB, twoLR, cols, loc in
+            self?.bridgeOpenAndInit(flow: flow, css: css,
+                                    oneTB: oneTB, oneLR: oneLR,
+                                    twoTB: twoTB, twoLR: twoLR,
+                                    maxColumnCount: cols, lastLocation: loc)
         }
         proxy?.goTo = { [weak self] target in self?.bridgeGoTo(target) }
         proxy?.goToFraction = { [weak self] frac in self?.bridgeGoToFraction(frac) }
@@ -586,6 +602,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         proxy?.setStyles = { [weak self] css in self?.bridgeSetStyles(css) }
         proxy?.setColumnCount = { [weak self] n in self?.bridgeSetColumnCount(n) }
         proxy?.setMargins = { [weak self] tb, lr in self?.bridgeSetMargins(topBottom: tb, leftRight: lr) }
+        proxy?.setMarginsBoth = { [weak self] oneTB, oneLR, twoTB, twoLR in
+            self?.bridgeSetMarginsBoth(oneTB: oneTB, oneLR: oneLR, twoTB: twoTB, twoLR: twoLR)
+        }
         proxy?.nextSection = { [weak self] in self?.bridgeNextSection() }
         proxy?.previousSection = { [weak self] in self?.bridgePreviousSection() }
         proxy?.setAnimated = { [weak self] enabled in self?.bridgeSetAnimated(enabled) }
@@ -653,8 +672,8 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     var startAtEnd: Bool = false
     var paginated: Bool = true
     var currentTwoUp: Bool? = nil
-    var currentMarginTB: Double? = nil
-    var currentMarginLR: Double? = nil
+    var currentMarginsOneUp: MarginSettings? = nil
+    var currentMarginsTwoUp: MarginSettings? = nil
 
     #if os(iOS)
     var trackpadPanRecognizer: UIPanGestureRecognizer?
@@ -754,9 +773,14 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     (function() {
         if (window.raedad) return;
 
+        // MARGIN_TB / MARGIN_LR are the *active* margin values for the
+        // currently-rendered layout. They're picked from marginsOneUp /
+        // marginsTwoUp inside updateColumnMetrics so when isTwoPage flips
+        // on rotation, the matching pair takes over without a Swift round trip.
         var MARGIN_TB = 48;
         var MARGIN_LR = 48;
-        var SPREAD_THRESHOLD = 1100;
+        var marginsOneUp = { tb: 48, lr: 48 };
+        var marginsTwoUp = { tb: 48, lr: 48 };
         var currentMode = null;
 
         // --- Shared state ---
@@ -1063,8 +1087,25 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             container.style.width = '';
         }
 
+        // forceTwoUp: true / false = explicit override, null = auto.
+        // In auto mode, two-up kicks in when the viewport is wider than tall.
+        // (Swift collapses auto to false for iPhone before sending, so this
+        // branch only fires on iPad / macOS / visionOS.)
+        function resolveTwoUp() {
+            if (forceTwoUp !== null) return forceTwoUp === true;
+            var w = window.innerWidth;
+            var h = window.innerHeight;
+            return w > 0 && h > 0 && w > h;
+        }
+
         function updateColumnMetrics(vw) {
-            isTwoPage = forceTwoUp === true;
+            isTwoPage = resolveTwoUp();
+            // Pick the margin pair that matches the resolved layout. On
+            // rotation this re-runs and the active margins flip with the
+            // column count, so layout stays internally consistent.
+            var m = isTwoPage ? marginsTwoUp : marginsOneUp;
+            MARGIN_TB = m.tb;
+            MARGIN_LR = m.lr;
             cachedColGap = MARGIN_LR * 2;
             cachedColWidth = isTwoPage
                 ? (vw - cachedColGap * 2) / 2
@@ -1477,8 +1518,23 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         // --- Init ---
         function initPaginated(options) {
             currentMode = 'paginated';
-            if (options.marginTB !== undefined) MARGIN_TB = options.marginTB;
-            if (options.marginLR !== undefined) MARGIN_LR = options.marginLR;
+            // Both margin pairs are stored locally; updateColumnMetrics picks
+            // one based on the resolved layout.
+            if (options.marginsOneUp) {
+                marginsOneUp = { tb: options.marginsOneUp.tb, lr: options.marginsOneUp.lr };
+            }
+            if (options.marginsTwoUp) {
+                marginsTwoUp = { tb: options.marginsTwoUp.tb, lr: options.marginsTwoUp.lr };
+            }
+            // Backward-compat: a single pair fills both layouts.
+            if (options.marginTB !== undefined) {
+                marginsOneUp.tb = options.marginTB;
+                marginsTwoUp.tb = options.marginTB;
+            }
+            if (options.marginLR !== undefined) {
+                marginsOneUp.lr = options.marginLR;
+                marginsTwoUp.lr = options.marginLR;
+            }
             if (options.twoUp !== undefined) forceTwoUp = options.twoUp;
 
             // DOM setup: body > scroller > container > [content]
@@ -1685,7 +1741,18 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             totalPages: function() { return totalPages(); },
             currentPage: function() { return currentPageIdx; },
             setTwoUp: function(value) { setTwoUp(value); },
-            setMargins: function(tb, lr) { MARGIN_TB = tb; MARGIN_LR = lr; if (currentMode === 'paginated') { applyLayout(); appendVirtualColumnIfNeeded(); snapToPageBoundaries(); reportPage(); } },
+            // Backward-compat: applies the same pair to both layouts.
+            // New callers should prefer setMarginsBoth.
+            setMargins: function(tb, lr) {
+                marginsOneUp = { tb: tb, lr: lr };
+                marginsTwoUp = { tb: tb, lr: lr };
+                if (currentMode === 'paginated') { applyLayout(); appendVirtualColumnIfNeeded(); snapToPageBoundaries(); reportPage(); }
+            },
+            setMarginsBoth: function(oneTB, oneLR, twoTB, twoLR) {
+                marginsOneUp = { tb: oneTB, lr: oneLR };
+                marginsTwoUp = { tb: twoTB, lr: twoLR };
+                if (currentMode === 'paginated') { applyLayout(); appendVirtualColumnIfNeeded(); snapToPageBoundaries(); reportPage(); }
+            },
             panStart: function() { panStart(); },
             panMove: function(dx) { panMove(dx); },
             panEnd: function(velocityX) { panEnd(velocityX); },
@@ -1808,6 +1875,10 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         webView?.evaluateJavaScript("window.bridge?.setMargins(\(Int(topBottom)), \(Int(leftRight)));")
     }
 
+    func bridgeSetMarginsBoth(oneTB: Double, oneLR: Double, twoTB: Double, twoLR: Double) {
+        webView?.evaluateJavaScript("window.bridge?.setMarginsBoth(\(Int(oneTB)), \(Int(oneLR)), \(Int(twoTB)), \(Int(twoLR)));")
+    }
+
     func bridgeNextSection() {
         webView?.evaluateJavaScript("window.bridge?.nextSection();")
     }
@@ -1869,6 +1940,11 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         webView?.evaluateJavaScript("window.raedad?.setMargins(\(topBottom), \(leftRight));")
     }
 
+    func textReaderSetMarginsBoth(one: MarginSettings, two: MarginSettings) {
+        let js = "window.raedad?.setMarginsBoth(\(one.topBottom), \(one.leftRight), \(two.topBottom), \(two.leftRight));"
+        webView?.evaluateJavaScript(js)
+    }
+
     func textReaderGoToPage(_ page: Int, animate: Bool = true) {
         webView?.evaluateJavaScript("window.raedad?.goToPage(\(page), \(animate));")
     }
@@ -1895,7 +1971,10 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     /// Opens the EPUB and applies all initial settings in a single chained async call.
-    func bridgeOpenAndInit(flow: String, css: String, marginTB: Double?, marginLR: Double?, maxColumnCount: Int?, lastLocation: String?) {
+    func bridgeOpenAndInit(flow: String, css: String,
+                           oneTB: Double, oneLR: Double,
+                           twoTB: Double, twoLR: Double,
+                           maxColumnCount: Int?, lastLocation: String?) {
         webLog.info("bridgeOpenAndInit: flow=\(flow, privacy: .public), cols=\(String(describing: maxColumnCount), privacy: .public), loc=\(String(describing: lastLocation), privacy: .public)")
         let bookURL = "\(epubScheme)://bundle/book.epub"
         let escapedCSS = css
@@ -1906,12 +1985,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         // re-resolves on resize), Int = force that fixed value.
         let colArg = maxColumnCount.map(String.init) ?? "'auto'"
         let colJS = "window.bridge.setColumnCount(\(colArg));"
-        let marginJS: String
-        if let tb = marginTB, let lr = marginLR {
-            marginJS = "window.bridge.setMargins(\(Int(tb)), \(Int(lr)));"
-        } else {
-            marginJS = ""
-        }
+        let marginJS = "window.bridge.setMarginsBoth(\(Int(oneTB)), \(Int(oneLR)), \(Int(twoTB)), \(Int(twoLR)));"
         let initJS: String
         if let cfi = lastLocation {
             let escapedCFI = cfi
@@ -1927,9 +2001,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 await window.bridge.open('\(bookURL)');
                 window.bridge.setFlow('\(flow)');
                 window.bridge.setStyles(`\(escapedCSS)`);
+                \(marginJS)
                 \(colJS)
                 \(initJS)
-                \(marginJS)
             } catch(e) {
                 window.webkit.messageHandlers.bridge.postMessage({type:'error', message:'openAndInit: '+e.message});
             }
@@ -1973,11 +2047,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
                 let mode = paginated ? "paginated" : "scroll"
                 var options: [String: Any] = [:]
-                if let tb = currentMarginTB {
-                    options["marginTB"] = tb
-                }
-                if let lr = currentMarginLR {
-                    options["marginLR"] = lr
+                if let one = currentMarginsOneUp, let two = currentMarginsTwoUp {
+                    options["marginsOneUp"] = ["tb": one.topBottom, "lr": one.leftRight]
+                    options["marginsTwoUp"] = ["tb": two.topBottom, "lr": two.leftRight]
                 }
                 if let twoUp = currentTwoUp {
                     options["twoUp"] = twoUp

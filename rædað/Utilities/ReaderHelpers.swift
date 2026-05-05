@@ -5,10 +5,10 @@ enum ReaderHelpers {
 
     // MARK: - Automatic Two-Up Resolution
 
-    /// Resolves the auto two-up state from the current view size.
-    /// iPhone always returns false (landscape too narrow). iPad/macOS/visionOS
-    /// return true when the available area is wider than tall. Falls back to
-    /// platform orientation when the view size is not yet known.
+    /// Resolves the auto two-up state from the current view size, used for
+    /// Swift-side display (toolbar icon, margin selection). iPhone always
+    /// returns false (landscape too narrow for two columns). Other devices
+    /// return true when the area is wider than tall.
     static func defaultTwoUp(viewWidth: CGFloat, viewHeight: CGFloat) -> Bool {
         #if os(iOS)
         if UIDevice.current.userInterfaceIdiom == .phone { return false }
@@ -30,6 +30,31 @@ enum ReaderHelpers {
         #else
         return false
         #endif
+    }
+
+    // MARK: - Bridge twoUp resolution
+
+    /// Resolves a `twoUpOverride` (nil = auto, true/false = explicit) into the
+    /// value to send to the JS bridge. iPhone collapses auto to single page,
+    /// since landscape is too narrow for a real two-column spread; on other
+    /// devices nil flows through and the bridge auto-resolves from viewport
+    /// orientation (and re-resolves on every resize).
+    static func resolveTwoUpForBridge(_ override: Bool?) -> Bool? {
+        if let override { return override }
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone { return false }
+        #endif
+        return nil
+    }
+
+    /// Same as `resolveTwoUpForBridge` but as an Int? for ePub's column-count API:
+    /// nil = auto (bridge resolves), 1 = force single, 2 = force two-up.
+    static func resolveColumnCountForBridge(_ override: Bool?) -> Int? {
+        switch resolveTwoUpForBridge(override) {
+        case .some(true): return 2
+        case .some(false): return 1
+        case .none: return nil
+        }
     }
 
     // MARK: - View Mode Icon

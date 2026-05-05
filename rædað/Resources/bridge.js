@@ -25,6 +25,10 @@ let lastMarginPx = 0
 // currentColumnCount is the resolved value foliate is currently rendering.
 let columnPreference = 'auto'
 let currentColumnCount = 1
+// Both margin pairs are stored locally so the bridge can pick the right one
+// when the resolved column count flips on rotation, without a Swift round trip.
+let marginsOneUp = { tb: 0, lr: 0 }
+let marginsTwoUp = { tb: 0, lr: 0 }
 
 // Read-aloud state
 //
@@ -170,6 +174,22 @@ function applyMarginGap() {
     }
 }
 
+// Pick the margin pair that matches the currently rendered layout. Two-up
+// margins only apply in paginated mode with 2 columns; scrolling mode and
+// single-page paginated both use the one-up pair.
+function applyCurrentMargins() {
+    if (!view.renderer) return
+    const useTwoUp = currentFlow === 'paginated' && currentColumnCount === 2
+    const m = useTwoUp ? marginsTwoUp : marginsOneUp
+    view.renderer.setAttribute('margin', m.tb + 'px')
+    lastMarginPx = m.lr
+    if (view.renderer.getBoundingClientRect().width > 0) {
+        applyMarginGap()
+    } else {
+        requestAnimationFrame(() => applyMarginGap())
+    }
+}
+
 function updateMaxInlineSize() {
     if (!view.renderer) return
     const w = view.renderer.getBoundingClientRect().width || window.innerWidth
@@ -191,7 +211,8 @@ function resolveColumnCount() {
 
 // Apply the resolved column count to the renderer and update inline size.
 // In 'auto' mode, this is called on every resize so rotation flips columns
-// without Swift having to orchestrate the change.
+// without Swift having to orchestrate the change. Always re-applies margins
+// so the right pair is in effect even on initial layout.
 function applyResolvedColumnCount() {
     const n = resolveColumnCount()
     currentColumnCount = n
@@ -199,6 +220,7 @@ function applyResolvedColumnCount() {
         view.renderer.setAttribute('max-column-count', String(n))
     }
     updateMaxInlineSize()
+    applyCurrentMargins()
 }
 
 window.addEventListener('resize', () => {
@@ -1022,6 +1044,9 @@ window.bridge = {
         if (view.renderer) {
             view.renderer.setAttribute('flow', mode === 'paginated' ? 'paginated' : 'scrolled')
             view.renderer.setAttribute('animated', '')
+            // Margins differ between scrolling (always one-up) and paginated
+            // (one-up or two-up). Re-pick when the flow changes.
+            applyCurrentMargins()
         }
     },
 
@@ -1054,22 +1079,22 @@ window.bridge = {
         }
     },
 
+    // Backward-compat single-pair setter — applies the same margins to both
+    // one-up and two-up. New callers should use setMarginsBoth so the bridge
+    // can pick the right pair when the resolved column count flips.
     setMargins(topBottom, leftRight) {
-        if (view.renderer) {
-            // Top/bottom margin via foliate-js attribute (grid row sizing)
-            view.renderer.setAttribute('margin', topBottom + 'px')
-            // Left/right edge padding via 'gap' attribute.
-            // foliate-js grid: outer columns = minmax(half-gap, 1fr), content spans inner columns.
-            // Visible side padding = half-gap = gap/2 (percentage of renderer width).
-            // To get side padding = px: gap = 200 * px / w
-            lastMarginPx = leftRight
-            // Try immediately; if renderer hasn't laid out yet, retry after frame
-            if (view.renderer.getBoundingClientRect().width > 0) {
-                applyMarginGap()
-            } else {
-                requestAnimationFrame(() => applyMarginGap())
-            }
-        }
+        marginsOneUp = { tb: topBottom, lr: leftRight }
+        marginsTwoUp = { tb: topBottom, lr: leftRight }
+        applyCurrentMargins()
+    },
+
+    // Sets both margin pairs at once. The bridge picks one-up vs two-up based
+    // on currentColumnCount, and re-picks automatically when the column count
+    // flips on rotation (see applyResolvedColumnCount).
+    setMarginsBoth(oneTB, oneLR, twoTB, twoLR) {
+        marginsOneUp = { tb: oneTB, lr: oneLR }
+        marginsTwoUp = { tb: twoTB, lr: twoLR }
+        applyCurrentMargins()
     },
 
     setMaxInlineSize(value) {

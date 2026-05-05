@@ -281,6 +281,9 @@ struct PDFReaderView: View {
             }
         }
         #endif
+        // PDFs render their own backgrounds (often white paper), so we lock
+        // the chrome to light regardless of the user's theme — a dark UI
+        // around white pages flickers and looks broken.
         .preferredColorScheme(.light)
     }
 
@@ -711,6 +714,9 @@ struct PDFReaderView: View {
         )
     }
 
+    /// Skip page 0 so closing on the cover page doesn't pin the auto-restore
+    /// to "page 1" forever. The user is treated as "hasn't read yet" until
+    /// they advance past the first page. Comic reader uses the same rule.
     private func autoSavePosition() {
         guard let url = fileURL else { return }
         guard currentPageIndex > 0 else { return }

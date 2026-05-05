@@ -195,6 +195,9 @@ struct ComicReaderView: View {
         #if os(iOS)
         .toolbarVisibility(.hidden, for: .automatic)
         .toolbarVisibility(.hidden, for: .navigationBar)
+        // Comics render full-bleed images on a black background, so the chrome
+        // is locked to dark regardless of the user's theme — a light UI around
+        // dark pages is jarring and breaks immersion.
         .preferredColorScheme(.dark)
         #endif
         .onKeyPress(.escape) {

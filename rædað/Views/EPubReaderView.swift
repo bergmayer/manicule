@@ -1,6 +1,12 @@
 import SwiftUI
 import AVFoundation
 
+/// Both margin pairs as a single Equatable value for SwiftUI .onChange.
+private struct MarginPair: Equatable {
+    let oneUp: MarginSettings
+    let twoUp: MarginSettings
+}
+
 /// Displays an ePub book using foliate-js web components with built-in pagination,
 /// touch handling, and CFI-based navigation.
 struct EPubReaderView: View {
@@ -83,9 +89,18 @@ struct EPubReaderView: View {
         return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
-    private var activeMargins: MarginSettings {
+    /// Both margin pairs as a single Equatable value, used to drive a single
+    /// onChange that re-sends to the bridge whenever either pair changes (e.g.
+    /// the user moves a slider in Reading Settings).
+    private var marginPairs: MarginPair {
         let effective = readingPrefs.effective(for: fileHash)
-        return effectiveTwoUp ? effective.marginsTwoUp : effective.marginsOneUp
+        return MarginPair(oneUp: effective.marginsOneUp, twoUp: effective.marginsTwoUp)
+    }
+
+    private func sendBothMargins() {
+        let m = marginPairs
+        webViewProxy.setMarginsBoth?(m.oneUp.topBottom, m.oneUp.leftRight,
+                                      m.twoUp.topBottom, m.twoUp.leftRight)
     }
 
     var body: some View {
@@ -105,8 +120,11 @@ struct EPubReaderView: View {
             .onChange(of: readingPrefs.effective(for: fileHash).foliateCSS) { _, newCSS in
                 webViewProxy.setStyles?(newCSS)
             }
-            .onChange(of: activeMargins) { _, newMargins in
-                webViewProxy.setMargins?(newMargins.topBottom, newMargins.leftRight)
+            // The bridge owns per-orientation margin selection — when the user
+            // edits either pair in Reading Settings we re-send both, and the
+            // bridge picks the matching one based on its resolved column count.
+            .onChange(of: marginPairs) { _, _ in
+                sendBothMargins()
             }
     }
 
@@ -585,15 +603,11 @@ struct EPubReaderView: View {
         let effective = readingPrefs.effective(for: fileHash)
         let flow = isPaginated ? "paginated" : "scrolled"
         let css = effective.foliateCSS
-        let margins = activeMargins
-        // nil = 'auto' (foliate handles orientation internally),
-        // 1 / 2 force a fixed column count.
-        let cols: Int?
-        if let override = twoUpOverride {
-            cols = override ? 2 : 1
-        } else {
-            cols = nil
-        }
+        let oneUp = effective.marginsOneUp
+        let twoUp = effective.marginsTwoUp
+        // nil = 'auto' (foliate handles orientation internally on iPad/Mac);
+        // 1 / 2 force a fixed column count. iPhone always gets 1.
+        let cols = ReaderHelpers.resolveColumnCountForBridge(twoUpOverride)
 
         // Load position for restoration: auto-saved position first, then manual bookmarks
         let lastCFI: String?
@@ -611,8 +625,13 @@ struct EPubReaderView: View {
             lastCFI = nil
         }
 
-        // Open book, apply settings, and init navigation in one chained call
-        webViewProxy.openAndInit?(flow, css, margins.topBottom, margins.leftRight, cols, lastCFI)
+        // Open book, apply settings, and init navigation in one chained call.
+        // Both margin pairs go to the bridge so it can pick the right one
+        // when the resolved column count flips on rotation.
+        webViewProxy.openAndInit?(flow, css,
+                                  oneUp.topBottom, oneUp.leftRight,
+                                  twoUp.topBottom, twoUp.leftRight,
+                                  cols, lastCFI)
     }
 
     private func handleRelocate(_ event: RelocateEvent) {
@@ -689,6 +708,11 @@ struct EPubReaderView: View {
 
     // MARK: - Key repeat quick vanish
 
+    // ePub-specific: foliate-js animates page turns, which becomes visually
+    // noisy when the user holds an arrow key. After 4 rapid repeats we ask
+    // the bridge to skip animation, then re-enable on the timer reset. The
+    // other readers don't need this — PDF/Comic image swaps are instant and
+    // text-reader page turns animate via raedad.js's own velocity damping.
     private func handleKeyRepeat(_ phase: KeyPress.Phases) {
         if phase == .down {
             keyRepeatCount = 0
@@ -815,16 +839,16 @@ struct EPubReaderView: View {
         readingPrefs.updatePreference(for: fileHash, apply: { $0.fontSize = newSize }, applyGlobal: { readingPrefs.fontSize = newSize })
     }
 
+    // The bridge picks the matching margin pair from its stored values whenever
+    // the resolved column count flips (see applyResolvedColumnCount in bridge.js),
+    // so these handlers only need to update the column preference and reading-mode
+    // flow — margins flow in via .onChange(of: marginPairs) and openAndInit.
     private func selectAutomatic() {
         let wasScrolling = !isPaginated
         viewMode = .paginated
         twoUpOverride = nil
         if wasScrolling { webViewProxy.setFlow?("paginated") }
-        // nil = 'auto' — foliate resolves columns from orientation and
-        // re-resolves on every resize, so rotation just works.
-        webViewProxy.setColumnCount?(nil)
-        let m = activeMargins
-        webViewProxy.setMargins?(m.topBottom, m.leftRight)
+        webViewProxy.setColumnCount?(ReaderHelpers.resolveColumnCountForBridge(nil))
         restoreCurrentPosition()
         readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .paginated })
     }
@@ -835,8 +859,6 @@ struct EPubReaderView: View {
         twoUpOverride = false
         if wasScrolling { webViewProxy.setFlow?("paginated") }
         webViewProxy.setColumnCount?(1)
-        let m = readingPrefs.effective(for: fileHash).marginsOneUp
-        webViewProxy.setMargins?(m.topBottom, m.leftRight)
         restoreCurrentPosition()
         readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = false }, applyGlobal: { readingPrefs.viewMode = .paginated })
     }
@@ -847,8 +869,6 @@ struct EPubReaderView: View {
         twoUpOverride = true
         if wasScrolling { webViewProxy.setFlow?("paginated") }
         webViewProxy.setColumnCount?(2)
-        let m = readingPrefs.effective(for: fileHash).marginsTwoUp
-        webViewProxy.setMargins?(m.topBottom, m.leftRight)
         restoreCurrentPosition()
         readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .paginated; $0.twoUp = true }, applyGlobal: { readingPrefs.viewMode = .paginated })
     }
@@ -856,8 +876,6 @@ struct EPubReaderView: View {
     private func selectScrolling() {
         viewMode = .scrolling
         webViewProxy.setFlow?("scrolled")
-        let m = readingPrefs.effective(for: fileHash).marginsOneUp
-        webViewProxy.setMargins?(m.topBottom, m.leftRight)
         restoreCurrentPosition()
         readingPrefs.updatePreference(for: fileHash, apply: { $0.viewMode = .scrolling; $0.twoUp = nil }, applyGlobal: { readingPrefs.viewMode = .scrolling })
     }
