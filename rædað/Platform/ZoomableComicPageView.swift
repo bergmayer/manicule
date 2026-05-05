@@ -118,12 +118,7 @@ private struct ZoomableComicPageView_iOS: UIViewRepresentable {
     }
 
     private func loadImage(into imageView: UIImageView, scrollView: UIScrollView) {
-        guard var uiImage = UIImage(contentsOfFile: imageURL.path) else { return }
-        if trimWhitespace, let cgImage = uiImage.cgImage {
-            let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: imageURL.lastPathComponent)
-            uiImage = UIImage(cgImage: trimmed, scale: uiImage.scale, orientation: uiImage.imageOrientation)
-        }
-        imageView.image = uiImage
+        imageView.image = loadComicImage(at: imageURL, trim: trimWhitespace)
         imageView.frame = CGRect(origin: .zero, size: viewSize)
         scrollView.contentSize = viewSize
         scrollView.zoomScale = CGFloat(zoomScale)
@@ -252,7 +247,7 @@ private struct ZoomableComicPageView_macOS: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
 
-        let imageView = FlippedImageView()
+        let imageView = FlippedNSImageView()
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.imageAlignment = .alignCenter
         scrollView.documentView = imageView
@@ -319,12 +314,7 @@ private struct ZoomableComicPageView_macOS: NSViewRepresentable {
     }
 
     private func loadImage(into imageView: NSImageView, scrollView: NSScrollView, context: Context) {
-        guard var nsImage = NSImage(contentsOf: imageURL) else { return }
-        if trimWhitespace, let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: imageURL.lastPathComponent)
-            nsImage = NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
-        }
-        imageView.image = nsImage
+        imageView.image = loadComicImage(at: imageURL, trim: trimWhitespace)
         imageView.frame = CGRect(origin: .zero, size: viewSize)
         scrollView.magnification = CGFloat(zoomScale)
         context.coordinator.currentURL = imageURL
@@ -447,8 +437,4 @@ private class PageTurnScrollView: NSScrollView {
     }
 }
 
-/// NSImageView subclass with flipped coordinate system for proper layout in NSScrollView.
-private class FlippedImageView: NSImageView {
-    override var isFlipped: Bool { true }
-}
 #endif

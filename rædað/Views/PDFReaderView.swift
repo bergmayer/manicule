@@ -44,13 +44,10 @@ struct PDFReaderView: View {
     @State private var fastScroll = FastScrollController()
 
     // Search state
-    @State private var showSearch = false
-    @State private var searchQuery = ""
+    @State private var search = ReaderSearchState()
     @State private var searchSelections: [PDFSelection] = []
     @State private var ocrMatchPages: [Int] = []
     @State private var usingOCR = false
-    @State private var currentSearchIndex = 0
-    @State private var isSearching = false
 
     @FocusState private var isFocused: Bool
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -106,8 +103,8 @@ struct PDFReaderView: View {
                 onShowSavedPositions: { showBookmarks = true },
                 onShowReadingSettings: { showSettings = true },
                 onToggleSearch: {
-                    showSearch.toggle()
-                    if !showSearch { dismissPdfSearch() }
+                    search.isShowing.toggle()
+                    if !search.isShowing { dismissPdfSearch() }
                 },
                 onToggleImmersive: { showChrome.toggle() },
                 onZoomIn: { zoomScale = min(4.0, (zoomScale ?? 1.0) * 1.25) },
@@ -116,7 +113,7 @@ struct PDFReaderView: View {
             .onReceive(NotificationCenter.default.publisher(for: .showGoToPage)) { _ in
                 showGoToPage = true
             }
-            .onChange(of: searchQuery) { _, newQuery in
+            .onChange(of: search.query) { _, newQuery in
                 performPdfSearch(newQuery)
             }
             .onChange(of: currentPageIndex) { _, newPage in
@@ -205,18 +202,18 @@ struct PDFReaderView: View {
             isFocused = true
         }
         .escapeDismisses(
-            searchShowing: { showSearch },
+            searchShowing: { search.isShowing },
             dismissSearch: dismissPdfSearch,
             showChrome: $showChrome
         )
         .background(Color.white.ignoresSafeArea())
         .overlay(alignment: .top) {
-            if showSearch {
+            if search.isShowing {
                 SearchBarView(
-                    query: $searchQuery,
-                    isSearching: $isSearching,
+                    query: $search.query,
+                    isSearching: $search.isSearching,
                     resultCount: pdfSearchResultCount,
-                    currentResult: pdfSearchResultCount == 0 ? 0 : currentSearchIndex + 1,
+                    currentResult: pdfSearchResultCount == 0 ? 0 : search.currentIndex + 1,
                     onNext: { navigatePdfSearchResult(forward: true) },
                     onPrevious: { navigatePdfSearchResult(forward: false) },
                     onDismiss: { dismissPdfSearch() }
@@ -225,7 +222,7 @@ struct PDFReaderView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: showSearch)
+        .animation(.easeInOut(duration: 0.2), value: search.isShowing)
         #if os(iOS)
         .overlay(alignment: .top) {
             if !showChrome {
@@ -267,8 +264,8 @@ struct PDFReaderView: View {
     // MARK: - Content
 
     private var currentHighlightSelection: PDFSelection? {
-        guard !usingOCR, currentSearchIndex < searchSelections.count else { return nil }
-        return searchSelections[currentSearchIndex]
+        guard !usingOCR, search.currentIndex < searchSelections.count else { return nil }
+        return searchSelections[search.currentIndex]
     }
 
     @ViewBuilder
@@ -342,7 +339,7 @@ struct PDFReaderView: View {
                         Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                               systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                     }
-                    Button { showSearch.toggle(); if !showSearch { dismissPdfSearch() } } label: {
+                    Button { search.isShowing.toggle(); if !search.isShowing { dismissPdfSearch() } } label: {
                         Label("Search", systemImage: "magnifyingglass")
                     }
                 }
@@ -457,7 +454,7 @@ struct PDFReaderView: View {
                             Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                                   systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                         }
-                        Button { showSearch.toggle(); if !showSearch { dismissPdfSearch() } } label: {
+                        Button { search.isShowing.toggle(); if !search.isShowing { dismissPdfSearch() } } label: {
                             Label("Search", systemImage: "magnifyingglass")
                         }
                     }
@@ -518,7 +515,7 @@ struct PDFReaderView: View {
             }
 
             ToolbarItem(placement: .automatic) {
-                Button { showSearch.toggle(); if !showSearch { dismissPdfSearch() } } label: {
+                Button { search.isShowing.toggle(); if !search.isShowing { dismissPdfSearch() } } label: {
                     Label("Search", systemImage: "magnifyingglass")
                 }
             }
@@ -594,21 +591,21 @@ struct PDFReaderView: View {
             searchSelections = []
             ocrMatchPages = []
             usingOCR = false
-            currentSearchIndex = 0
-            isSearching = false
+            search.currentIndex = 0
+            search.isSearching = false
             return
         }
-        isSearching = true
+        search.isSearching = true
         usingOCR = false
         ocrMatchPages = []
 
         // First try PDFKit text search
         let selections = doc.findString(query, withOptions: [.caseInsensitive])
         searchSelections = selections
-        currentSearchIndex = 0
+        search.currentIndex = 0
 
         if !selections.isEmpty {
-            isSearching = false
+            search.isSearching = false
             if let first = selections.first {
                 navigateToSelection(first)
             }
@@ -652,7 +649,7 @@ struct PDFReaderView: View {
                 }
             }
             await MainActor.run {
-                isSearching = false
+                search.isSearching = false
                 if let first = matches.first {
                     currentPageIndex = first
                 }
@@ -664,14 +661,14 @@ struct PDFReaderView: View {
         let count = pdfSearchResultCount
         guard count > 0 else { return }
         if forward {
-            currentSearchIndex = (currentSearchIndex + 1) % count
+            search.currentIndex = (search.currentIndex + 1) % count
         } else {
-            currentSearchIndex = (currentSearchIndex - 1 + count) % count
+            search.currentIndex = (search.currentIndex - 1 + count) % count
         }
         if usingOCR {
-            currentPageIndex = ocrMatchPages[currentSearchIndex]
+            currentPageIndex = ocrMatchPages[search.currentIndex]
         } else {
-            navigateToSelection(searchSelections[currentSearchIndex])
+            navigateToSelection(searchSelections[search.currentIndex])
         }
     }
 
@@ -684,13 +681,10 @@ struct PDFReaderView: View {
     }
 
     private func dismissPdfSearch() {
-        showSearch = false
-        searchQuery = ""
+        search.reset()
         searchSelections = []
         ocrMatchPages = []
         usingOCR = false
-        currentSearchIndex = 0
-        isSearching = false
     }
 
     private func toggleBookmark() {

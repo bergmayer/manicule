@@ -1,5 +1,4 @@
 import SwiftUI
-import ImageIO
 
 /// Zoomable vertical comic strip using platform-native scroll views.
 /// Supports pinch-to-zoom, double-tap/click zoom toggle, pan when zoomed,
@@ -25,15 +24,6 @@ struct ZoomableComicStripView: View {
         )
         #endif
     }
-}
-
-/// Read image pixel dimensions without decoding the full image.
-private func imageDimensions(at url: URL) -> CGSize? {
-    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
-          let w = props[kCGImagePropertyPixelWidth as String] as? Int,
-          let h = props[kCGImagePropertyPixelHeight as String] as? Int else { return nil }
-    return CGSize(width: w, height: h)
 }
 
 // MARK: - iOS Implementation
@@ -225,13 +215,7 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
                 let bottom = iv.frame.maxY
                 if bottom >= visibleY - buffer && top <= visibleY + visibleH + buffer {
                     if iv.image == nil {
-                        if var img = UIImage(contentsOfFile: pages[i].path) {
-                            if trimWhitespace, let cg = img.cgImage {
-                                let trimmed = ContentTrimmer.shared.trimmed(cg, key: pages[i].lastPathComponent)
-                                img = UIImage(cgImage: trimmed, scale: img.scale, orientation: img.imageOrientation)
-                            }
-                            iv.image = img
-                        }
+                        iv.image = loadComicImage(at: pages[i], trim: trimWhitespace)
                     }
                 } else {
                     iv.image = nil
@@ -269,11 +253,6 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
 #if os(macOS)
 import AppKit
 
-/// NSView subclass with flipped coordinates for top-to-bottom layout.
-private class FlippedContainerView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// NSScrollView subclass that triggers initial page layout once bounds are available.
 private class ComicStripScrollView: NSScrollView {
     weak var coordinator: ZoomableComicStripView_macOS.Coordinator?
@@ -308,7 +287,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
         sv.drawsBackground = false
         sv.backgroundColor = .clear
 
-        let container = FlippedContainerView()
+        let container = FlippedNSView()
         sv.documentView = container
         context.coordinator.containerView = container
         context.coordinator.scrollView = sv
@@ -421,13 +400,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
                 iv.imageScaling = .scaleProportionallyUpOrDown
                 iv.imageAlignment = .alignCenter
                 iv.frame = CGRect(x: 0, y: y, width: width, height: h)
-                if var img = NSImage(contentsOf: url) {
-                    if trimWhitespace, let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                        let trimmed = ContentTrimmer.shared.trimmed(cg, key: url.lastPathComponent)
-                        img = NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
-                    }
-                    iv.image = img
-                }
+                iv.image = loadComicImage(at: url, trim: trimWhitespace)
                 container.addSubview(iv)
                 imageViews.append(iv)
                 pageOffsets.append(y)

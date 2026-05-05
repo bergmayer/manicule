@@ -113,6 +113,26 @@ extension View {
     }
 }
 
+// MARK: - Reader Search State
+
+/// The four search-UI fields every reader has. Per-format result types and
+/// dismiss cleanup stay in the reader (PDF clears OCR state, ePub clears the
+/// foliate highlight, etc.) — this struct only owns the common shape so the
+/// state declarations and SearchBarView wiring line up across readers.
+struct ReaderSearchState: Equatable {
+    var isShowing: Bool = false
+    var query: String = ""
+    var currentIndex: Int = 0
+    var isSearching: Bool = false
+
+    mutating func reset() {
+        isShowing = false
+        query = ""
+        currentIndex = 0
+        isSearching = false
+    }
+}
+
 // MARK: - Escape Dismissal
 
 private struct EscapeDismissModifier: ViewModifier {

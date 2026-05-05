@@ -50,11 +50,8 @@ struct TextReaderView: View {
     #endif
 
     // Search state
-    @State private var showSearch = false
-    @State private var searchQuery = ""
+    @State private var search = ReaderSearchState()
     @State private var searchMatchOffsets: [Range<String.Index>] = []
-    @State private var currentSearchIndex = 0
-    @State private var isSearching = false
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -234,8 +231,8 @@ struct TextReaderView: View {
                 onShowSavedPositions: { showBookmarks = true },
                 onShowReadingSettings: { showSettings = true },
                 onToggleSearch: {
-                    showSearch.toggle()
-                    if !showSearch { dismissTextSearch() }
+                    search.isShowing.toggle()
+                    if !search.isShowing { dismissTextSearch() }
                 },
                 onToggleImmersive: { showChrome.toggle() },
                 onZoomIn: { adjustFontSize(by: 1) },
@@ -249,7 +246,7 @@ struct TextReaderView: View {
                 toggleReadAloud()
             }
             #endif
-            .onChange(of: searchQuery) { _, newQuery in
+            .onChange(of: search.query) { _, newQuery in
                 performTextSearch(newQuery)
             }
     }
@@ -333,17 +330,17 @@ struct TextReaderView: View {
         #endif
         .preferredColorScheme(effective.theme.preferredColorScheme)
         .escapeDismisses(
-            searchShowing: { showSearch },
+            searchShowing: { search.isShowing },
             dismissSearch: dismissTextSearch,
             showChrome: $showChrome
         )
         .overlay(alignment: .top) {
-            if showSearch {
+            if search.isShowing {
                 SearchBarView(
-                    query: $searchQuery,
-                    isSearching: $isSearching,
+                    query: $search.query,
+                    isSearching: $search.isSearching,
                     resultCount: searchMatchOffsets.count,
-                    currentResult: searchMatchOffsets.isEmpty ? 0 : currentSearchIndex + 1,
+                    currentResult: searchMatchOffsets.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateTextSearchResult(forward: true) },
                     onPrevious: { navigateTextSearchResult(forward: false) },
                     onDismiss: { dismissTextSearch() }
@@ -352,7 +349,7 @@ struct TextReaderView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: showSearch)
+        .animation(.easeInOut(duration: 0.2), value: search.isShowing)
         #if os(iOS) || os(visionOS)
         // Overlay top bar (covers text, no reflow)
         .overlay(alignment: .top) {
@@ -444,7 +441,7 @@ struct TextReaderView: View {
                         Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                               systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                     }
-                    Button { showSearch.toggle(); if !showSearch { dismissTextSearch() } } label: {
+                    Button { search.isShowing.toggle(); if !search.isShowing { dismissTextSearch() } } label: {
                         Label("Search", systemImage: "magnifyingglass")
                     }
                 }
@@ -677,7 +674,7 @@ struct TextReaderView: View {
                             Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                                   systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                         }
-                        Button { showSearch.toggle(); if !showSearch { dismissTextSearch() } } label: {
+                        Button { search.isShowing.toggle(); if !search.isShowing { dismissTextSearch() } } label: {
                             Label("Search", systemImage: "magnifyingglass")
                         }
                     }
@@ -757,7 +754,7 @@ struct TextReaderView: View {
             }
 
             ToolbarItem(placement: .automatic) {
-                Button { showSearch.toggle(); if !showSearch { dismissTextSearch() } } label: {
+                Button { search.isShowing.toggle(); if !search.isShowing { dismissTextSearch() } } label: {
                     Label("Search", systemImage: "magnifyingglass")
                 }
             }
@@ -784,11 +781,11 @@ struct TextReaderView: View {
     private func performTextSearch(_ query: String) {
         guard !query.isEmpty else {
             searchMatchOffsets = []
-            currentSearchIndex = 0
-            isSearching = false
+            search.currentIndex = 0
+            search.isSearching = false
             return
         }
-        isSearching = true
+        search.isSearching = true
         let text = rawText
         let lowered = text.lowercased()
         let needle = query.lowercased()
@@ -799,8 +796,8 @@ struct TextReaderView: View {
             searchStart = range.upperBound
         }
         searchMatchOffsets = ranges
-        currentSearchIndex = 0
-        isSearching = false
+        search.currentIndex = 0
+        search.isSearching = false
         if !ranges.isEmpty {
             scrollToSearchMatch(at: 0)
         }
@@ -809,11 +806,11 @@ struct TextReaderView: View {
     private func navigateTextSearchResult(forward: Bool) {
         guard !searchMatchOffsets.isEmpty else { return }
         if forward {
-            currentSearchIndex = (currentSearchIndex + 1) % searchMatchOffsets.count
+            search.currentIndex = (search.currentIndex + 1) % searchMatchOffsets.count
         } else {
-            currentSearchIndex = (currentSearchIndex - 1 + searchMatchOffsets.count) % searchMatchOffsets.count
+            search.currentIndex = (search.currentIndex - 1 + searchMatchOffsets.count) % searchMatchOffsets.count
         }
-        scrollToSearchMatch(at: currentSearchIndex)
+        scrollToSearchMatch(at: search.currentIndex)
     }
 
     private func scrollToSearchMatch(at index: Int) {
@@ -839,11 +836,8 @@ struct TextReaderView: View {
     }
 
     private func dismissTextSearch() {
-        showSearch = false
-        searchQuery = ""
+        search.reset()
         searchMatchOffsets = []
-        currentSearchIndex = 0
-        isSearching = false
     }
 
     private var pageLabel: String {

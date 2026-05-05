@@ -40,11 +40,8 @@ struct ComicReaderView: View {
     @State private var fastScroll = FastScrollController()
 
     // Search state
-    @State private var showSearch = false
-    @State private var searchQuery = ""
+    @State private var search = ReaderSearchState()
     @State private var searchMatchPages: [Int] = []
-    @State private var currentSearchIndex = 0
-    @State private var isSearching = false
     @State private var ocrPagesScanned = 0
 
     @FocusState private var isFocused: Bool
@@ -101,8 +98,8 @@ struct ComicReaderView: View {
                 onShowSavedPositions: { showBookmarks = true },
                 onShowReadingSettings: { showSettings = true },
                 onToggleSearch: {
-                    showSearch.toggle()
-                    if !showSearch { dismissComicSearch() }
+                    search.isShowing.toggle()
+                    if !search.isShowing { dismissComicSearch() }
                 },
                 onToggleImmersive: { showChrome.toggle() },
                 onZoomIn: { zoomScale = min(5.0, zoomScale * 1.25) },
@@ -111,7 +108,7 @@ struct ComicReaderView: View {
             .onReceive(NotificationCenter.default.publisher(for: .toggleReadingDirection)) { _ in
                 readingDirection = readingDirection == .leftToRight ? .rightToLeft : .leftToRight
             }
-            .onChange(of: searchQuery) { _, newQuery in
+            .onChange(of: search.query) { _, newQuery in
                 performComicSearch(newQuery)
             }
     }
@@ -180,17 +177,17 @@ struct ComicReaderView: View {
         .preferredColorScheme(.dark)
         #endif
         .escapeDismisses(
-            searchShowing: { showSearch },
+            searchShowing: { search.isShowing },
             dismissSearch: dismissComicSearch,
             showChrome: $showChrome
         )
         .overlay(alignment: .top) {
-            if showSearch {
+            if search.isShowing {
                 SearchBarView(
-                    query: $searchQuery,
-                    isSearching: $isSearching,
+                    query: $search.query,
+                    isSearching: $search.isSearching,
                     resultCount: searchMatchPages.count,
-                    currentResult: searchMatchPages.isEmpty ? 0 : currentSearchIndex + 1,
+                    currentResult: searchMatchPages.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateComicSearchResult(forward: true) },
                     onPrevious: { navigateComicSearchResult(forward: false) },
                     onDismiss: { dismissComicSearch() }
@@ -199,7 +196,7 @@ struct ComicReaderView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: showSearch)
+        .animation(.easeInOut(duration: 0.2), value: search.isShowing)
         #if os(iOS)
         .overlay(alignment: .top) {
             if !showChrome {
@@ -269,7 +266,7 @@ struct ComicReaderView: View {
                         Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                               systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                     }
-                    Button { showSearch.toggle(); if !showSearch { dismissComicSearch() } } label: {
+                    Button { search.isShowing.toggle(); if !search.isShowing { dismissComicSearch() } } label: {
                         Label("Search", systemImage: "magnifyingglass")
                     }
                 }
@@ -568,14 +565,14 @@ struct ComicReaderView: View {
     private func performComicSearch(_ query: String) {
         guard !query.isEmpty else {
             searchMatchPages = []
-            currentSearchIndex = 0
-            isSearching = false
+            search.currentIndex = 0
+            search.isSearching = false
             ocrPagesScanned = 0
             return
         }
-        isSearching = true
+        search.isSearching = true
         searchMatchPages = []
-        currentSearchIndex = 0
+        search.currentIndex = 0
         ocrPagesScanned = 0
 
         Task {
@@ -591,7 +588,7 @@ struct ComicReaderView: View {
                 }
             }
             await MainActor.run {
-                isSearching = false
+                search.isSearching = false
                 if let first = matches.first {
                     currentPage = first
                 }
@@ -602,19 +599,16 @@ struct ComicReaderView: View {
     private func navigateComicSearchResult(forward: Bool) {
         guard !searchMatchPages.isEmpty else { return }
         if forward {
-            currentSearchIndex = (currentSearchIndex + 1) % searchMatchPages.count
+            search.currentIndex = (search.currentIndex + 1) % searchMatchPages.count
         } else {
-            currentSearchIndex = (currentSearchIndex - 1 + searchMatchPages.count) % searchMatchPages.count
+            search.currentIndex = (search.currentIndex - 1 + searchMatchPages.count) % searchMatchPages.count
         }
-        currentPage = searchMatchPages[currentSearchIndex]
+        currentPage = searchMatchPages[search.currentIndex]
     }
 
     private func dismissComicSearch() {
-        showSearch = false
-        searchQuery = ""
+        search.reset()
         searchMatchPages = []
-        currentSearchIndex = 0
-        isSearching = false
         ocrPagesScanned = 0
     }
 
@@ -680,7 +674,7 @@ struct ComicReaderView: View {
                             Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                                   systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                         }
-                        Button { showSearch.toggle(); if !showSearch { dismissComicSearch() } } label: {
+                        Button { search.isShowing.toggle(); if !search.isShowing { dismissComicSearch() } } label: {
                             Label("Search", systemImage: "magnifyingglass")
                         }
                     }
@@ -740,7 +734,7 @@ struct ComicReaderView: View {
             }
 
             ToolbarItem(placement: .automatic) {
-                Button { showSearch.toggle(); if !showSearch { dismissComicSearch() } } label: {
+                Button { search.isShowing.toggle(); if !search.isShowing { dismissComicSearch() } } label: {
                     Label("Search", systemImage: "magnifyingglass")
                 }
             }
@@ -796,25 +790,13 @@ private struct ComicPageView: View {
     private func loadImageAsync() async -> NSImage? {
         let url = imageURL
         let trim = trimWhitespace
-        return await Task.detached {
-            guard let nsImage = NSImage(contentsOf: url) else { return nil }
-            guard trim else { return nsImage }
-            guard let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nsImage }
-            let trimmed = await ContentTrimmer.shared.trimmed(cgImage, key: url.lastPathComponent)
-            return NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
-        }.value
+        return await Task.detached { loadComicImage(at: url, trim: trim) }.value
     }
     #else
     private func loadImageAsync() async -> UIImage? {
         let url = imageURL
         let trim = trimWhitespace
-        return await Task.detached {
-            guard let uiImage = UIImage(contentsOfFile: url.path) else { return nil }
-            guard trim else { return uiImage }
-            guard let cgImage = uiImage.cgImage else { return uiImage }
-            let trimmed = await ContentTrimmer.shared.trimmed(cgImage, key: url.lastPathComponent)
-            return UIImage(cgImage: trimmed, scale: uiImage.scale, orientation: uiImage.imageOrientation)
-        }.value
+        return await Task.detached { loadComicImage(at: url, trim: trim) }.value
     }
     #endif
 }

@@ -1,0 +1,52 @@
+import SwiftUI
+import ImageIO
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+/// Reads image pixel dimensions without decoding the full image. Used by the
+/// comic strip view to lay out its scroll content before any image is loaded.
+func imageDimensions(at url: URL) -> CGSize? {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+          let w = props[kCGImagePropertyPixelWidth as String] as? Int,
+          let h = props[kCGImagePropertyPixelHeight as String] as? Int else { return nil }
+    return CGSize(width: w, height: h)
+}
+
+#if canImport(UIKit)
+/// Loads a comic page from disk, optionally trimming whitespace borders.
+/// `key` is used to cache the trim result; pass the file's lastPathComponent.
+func loadComicImage(at url: URL, trim: Bool) -> UIImage? {
+    guard let image = UIImage(contentsOfFile: url.path) else { return nil }
+    guard trim, let cgImage = image.cgImage else { return image }
+    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.lastPathComponent)
+    return UIImage(cgImage: trimmed, scale: image.scale, orientation: image.imageOrientation)
+}
+#endif
+
+#if canImport(AppKit)
+/// Loads a comic page from disk, optionally trimming whitespace borders.
+/// `key` is used to cache the trim result; pass the file's lastPathComponent.
+func loadComicImage(at url: URL, trim: Bool) -> NSImage? {
+    guard let image = NSImage(contentsOf: url) else { return nil }
+    guard trim, let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
+    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.lastPathComponent)
+    return NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
+}
+
+/// NSImageView with a flipped coordinate system, used inside scroll views
+/// that need top-down layout (e.g. the comic strip view).
+final class FlippedNSImageView: NSImageView {
+    override var isFlipped: Bool { true }
+}
+
+/// NSView with a flipped coordinate system. The container of stacked image
+/// views in the comic strip uses this so vertical layout reads top-to-bottom.
+final class FlippedNSView: NSView {
+    override var isFlipped: Bool { true }
+}
+#endif

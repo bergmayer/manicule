@@ -908,10 +908,15 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         }
 
         var pageTurnLockTimer = null;
+        // 500ms is a safety margin over the 250ms animateScroll duration —
+        // long enough that overlapping flicks don't queue ghost page turns,
+        // short enough that the lock doesn't suppress a legitimate next
+        // input. Tuned by interactive feel; see git history before changing.
+        var PAGE_TURN_LOCK_MS = 500;
         function lockPageTurn() {
             pageTurnLock = true;
             clearTimeout(pageTurnLockTimer);
-            pageTurnLockTimer = setTimeout(unlockPageTurn, 500);
+            pageTurnLockTimer = setTimeout(unlockPageTurn, PAGE_TURN_LOCK_MS);
         }
         function unlockPageTurn() {
             pageTurnLock = false;
@@ -1371,6 +1376,16 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         }
 
         // --- Wheel (smooth tracking + snap) ---
+        // 120ms is "no wheel events for this many ms" — the cutoff for
+        // "user finished the gesture, snap to nearest page". Empirically
+        // matches trackpad inertia gaps; shorter values fire mid-gesture
+        // and snap unexpectedly, longer values feel sluggish.
+        var WHEEL_END_DEBOUNCE_MS = 120;
+        // Once a wheel run looks like inertial momentum (3 successive events
+        // with decreasing magnitude in the same direction within 200ms),
+        // we ignore the rest so the page doesn't keep turning after the
+        // user has stopped touching the trackpad.
+        var MOMENTUM_LIMIT = 3;
         var wheelStartScroll = 0;
         var wheelAccum = 0;
         var wheelTimeout = null;
@@ -1380,7 +1395,6 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         var lastWheelDelta = 0;
         var lastWheelDir = 0;
         var momentumCount = 0;
-        var MOMENTUM_LIMIT = 3;
 
         function handleWheel(e) {
             if (currentMode !== 'paginated') return;
@@ -1434,9 +1448,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 setScrollLeft(targetScroll);
             }
 
-            // Snap after gesture ends (no events for 120ms)
+            // Snap after gesture ends (no wheel events for WHEEL_END_DEBOUNCE_MS)
             clearTimeout(wheelTimeout);
-            wheelTimeout = setTimeout(wheelEnd, 120);
+            wheelTimeout = setTimeout(wheelEnd, WHEEL_END_DEBOUNCE_MS);
         }
 
         function wheelEnd() {

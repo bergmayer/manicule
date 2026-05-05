@@ -4,220 +4,41 @@ import PDFKit
 #if os(iOS)
 import UIKit
 
-/// UIPageViewController-based container for paginated PDF reading on iOS.
-/// Provides interactive finger-tracking swipe, tap zones, trackpad support,
-/// and per-page pinch-to-zoom. Handles both single-page and two-up modes.
-struct PaginatedPDFContainerView: UIViewControllerRepresentable {
+/// iOS PDF reader paginated view. The container/coordinator boilerplate lives
+/// in PaginatedContainer; this file just wires the per-page view controller.
+struct PaginatedPDFContainerView: View {
     let pdfDocument: PDFDocument
     @Binding var currentPage: Int
     let twoUp: Bool
     var trimWhitespace: Bool = false
     let onToggleChrome: () -> Void
 
-    func makeUIViewController(context: Context) -> UIPageViewController {
-        let pageVC = UIPageViewController(
-            transitionStyle: .scroll,
-            navigationOrientation: .horizontal,
-            options: [.interPageSpacing: 4]
-        )
-        pageVC.dataSource = context.coordinator
-        pageVC.delegate = context.coordinator
-        pageVC.view.backgroundColor = .white
-
-        // Single tap for zone detection
-        let singleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleSingleTap(_:)))
-        singleTap.numberOfTapsRequired = 1
-        pageVC.view.addGestureRecognizer(singleTap)
-
-        // Trackpad pan for page turning
-        let trackpadPan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTrackpadPan(_:)))
-        trackpadPan.allowedScrollTypesMask = .continuous
-        trackpadPan.maximumNumberOfTouches = 0
-        pageVC.view.addGestureRecognizer(trackpadPan)
-
-        // Set initial page
-        if let vc = context.coordinator.viewController(for: currentPage) {
-            pageVC.setViewControllers([vc], direction: .forward, animated: false)
-        }
-
-        return pageVC
-    }
-
-    func updateUIViewController(_ pageVC: UIPageViewController, context: Context) {
-        let coord = context.coordinator
-        let oldTwoUp = coord.twoUp
-        let oldTrim = coord.trimWhitespace
-        coord.pdfDocument = pdfDocument
-        coord.twoUp = twoUp
-        coord.trimWhitespace = trimWhitespace
-        coord.onToggleChrome = onToggleChrome
-
-        let displayedPage = coord.displayedPageIndex(from: pageVC)
-        let modeChanged = oldTwoUp != twoUp || oldTrim != trimWhitespace
-
-        if displayedPage != currentPage || modeChanged {
-            if let vc = coord.viewController(for: currentPage) {
-                let direction: UIPageViewController.NavigationDirection =
-                    currentPage > (displayedPage ?? 0) ? .forward : .reverse
-                pageVC.setViewControllers([vc], direction: direction, animated: false)
-            }
-        }
-
-        coord.currentPage = currentPage
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(
-            pdfDocument: pdfDocument,
+    var body: some View {
+        PaginatedContainer<PDFPageSpreadViewController>(
+            pageCount: pdfDocument.pageCount,
             currentPage: $currentPage,
-            twoUp: twoUp,
-            trimWhitespace: trimWhitespace,
+            pageStep: twoUp ? 2 : 1,
+            backgroundColor: .white,
+            interPageSpacing: 4,
+            supportsTrackpadPan: true,
+            // Re-display the current page when twoUp or trim toggles —
+            // existing VCs were rendered against the old mode.
+            layoutKey: AnyHashable([twoUp, trimWhitespace]),
             onToggleChrome: onToggleChrome
-        )
-    }
-
-    class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
-        var pdfDocument: PDFDocument
-        var currentPage: Int
-        private var currentPageBinding: Binding<Int>
-        var twoUp: Bool
-        var trimWhitespace: Bool
-        var onToggleChrome: () -> Void
-        private var trackpadTriggered = false
-        private var lastTapTime: TimeInterval = 0
-
-        init(pdfDocument: PDFDocument, currentPage: Binding<Int>, twoUp: Bool, trimWhitespace: Bool, onToggleChrome: @escaping () -> Void) {
-            self.pdfDocument = pdfDocument
-            self.currentPage = currentPage.wrappedValue
-            self.currentPageBinding = currentPage
-            self.twoUp = twoUp
-            self.trimWhitespace = trimWhitespace
-            self.onToggleChrome = onToggleChrome
-        }
-
-        private var pageCount: Int { pdfDocument.pageCount }
-        private var pageStep: Int { twoUp ? 2 : 1 }
-
-        func viewController(for pageIndex: Int) -> PDFPageSpreadViewController? {
-            guard pageIndex >= 0, pageIndex < pageCount else { return nil }
-            let secondIndex = twoUp && pageIndex + 1 < pageCount ? pageIndex + 1 : nil
+        ) { index in
+            let secondIndex = twoUp && index + 1 < pdfDocument.pageCount ? index + 1 : nil
             return PDFPageSpreadViewController(
                 pdfDocument: pdfDocument,
-                pageIndex: pageIndex,
+                pageIndex: index,
                 secondPageIndex: secondIndex,
                 trimWhitespace: trimWhitespace
             )
-        }
-
-        func displayedPageIndex(from pageVC: UIPageViewController) -> Int? {
-            guard let vc = pageVC.viewControllers?.first as? PDFPageSpreadViewController else { return nil }
-            return vc.pageIndex
-        }
-
-        // MARK: - UIPageViewControllerDataSource
-
-        func pageViewController(_ pageViewController: UIPageViewController,
-                                viewControllerBefore viewController: UIViewController) -> UIViewController? {
-            guard let vc = viewController as? PDFPageSpreadViewController else { return nil }
-            let prevIndex = vc.pageIndex - pageStep
-            guard prevIndex >= 0 else { return nil }
-            return self.viewController(for: prevIndex)
-        }
-
-        func pageViewController(_ pageViewController: UIPageViewController,
-                                viewControllerAfter viewController: UIViewController) -> UIViewController? {
-            guard let vc = viewController as? PDFPageSpreadViewController else { return nil }
-            let nextIndex = vc.pageIndex + pageStep
-            guard nextIndex < pageCount else { return nil }
-            return self.viewController(for: nextIndex)
-        }
-
-        // MARK: - UIPageViewControllerDelegate
-
-        func pageViewController(_ pageViewController: UIPageViewController,
-                                didFinishAnimating finished: Bool,
-                                previousViewControllers: [UIViewController],
-                                transitionCompleted completed: Bool) {
-            guard completed,
-                  let vc = pageViewController.viewControllers?.first as? PDFPageSpreadViewController else { return }
-            currentPage = vc.pageIndex
-            currentPageBinding.wrappedValue = vc.pageIndex
-        }
-
-        // MARK: - Tap Zones
-
-        @objc func handleSingleTap(_ gesture: UITapGestureRecognizer) {
-            guard gesture.state == .ended, let view = gesture.view else { return }
-            // Debounce: prevent a single trackpad click from firing twice
-            let now = CACurrentMediaTime()
-            guard now - lastTapTime > 0.2 else { return }
-            lastTapTime = now
-            let x = gesture.location(in: view).x
-            let width = view.bounds.width
-            if x < width / 3 {
-                goToPrevious(in: view)
-            } else if x > width * 2 / 3 {
-                goToNext(in: view)
-            } else {
-                onToggleChrome()
-            }
-        }
-
-        // MARK: - Trackpad Pan
-
-        @objc func handleTrackpadPan(_ gesture: UIPanGestureRecognizer) {
-            switch gesture.state {
-            case .began:
-                trackpadTriggered = false
-            case .changed:
-                guard !trackpadTriggered else { return }
-                let tx = gesture.translation(in: gesture.view).x
-                if abs(tx) > 20 {
-                    trackpadTriggered = true
-                    if let view = gesture.view {
-                        if tx < 0 { goToNext(in: view) } else { goToPrevious(in: view) }
-                    }
-                }
-            default:
-                break
-            }
-        }
-
-        // MARK: - Programmatic Navigation (instant, no animation)
-
-        private func goToNext(in view: UIView) {
-            let nextIndex = currentPage + pageStep
-            guard nextIndex < pageCount else { return }
-            guard let pageVC = findPageViewController(from: view),
-                  let vc = self.viewController(for: nextIndex) else { return }
-            currentPage = nextIndex
-            currentPageBinding.wrappedValue = nextIndex
-            pageVC.setViewControllers([vc], direction: .forward, animated: false)
-        }
-
-        private func goToPrevious(in view: UIView) {
-            let prevIndex = currentPage - pageStep
-            guard prevIndex >= 0 else { return }
-            guard let pageVC = findPageViewController(from: view),
-                  let vc = self.viewController(for: prevIndex) else { return }
-            currentPage = prevIndex
-            currentPageBinding.wrappedValue = prevIndex
-            pageVC.setViewControllers([vc], direction: .reverse, animated: false)
-        }
-
-        private func findPageViewController(from view: UIView) -> UIPageViewController? {
-            var responder: UIResponder? = view
-            while let next = responder?.next {
-                if let pageVC = next as? UIPageViewController { return pageVC }
-                responder = next
-            }
-            return nil
         }
     }
 }
 
 /// View controller for a single PDF page (or two-page spread) with pinch-to-zoom.
-class PDFPageSpreadViewController: UIViewController, UIScrollViewDelegate {
+class PDFPageSpreadViewController: UIViewController, UIScrollViewDelegate, PaginatedPageVC {
     let pdfDocument: PDFDocument
     let pageIndex: Int
     let secondPageIndex: Int?

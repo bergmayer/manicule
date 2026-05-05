@@ -61,11 +61,8 @@ struct EPubReaderView: View {
     #endif
 
     // Search state
-    @State private var showSearch = false
-    @State private var searchQuery = ""
+    @State private var search = ReaderSearchState()
     @State private var searchResults: [[String: String]] = []
-    @State private var currentSearchIndex = 0
-    @State private var isSearching = false
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -165,8 +162,8 @@ struct EPubReaderView: View {
                 onShowSavedPositions: { showBookmarks = true },
                 onShowReadingSettings: { showSettings = true },
                 onToggleSearch: {
-                    showSearch.toggle()
-                    if !showSearch { dismissSearch() }
+                    search.isShowing.toggle()
+                    if !search.isShowing { dismissSearch() }
                 },
                 onToggleImmersive: { showChrome.toggle() },
                 onZoomIn: { adjustFontSize(by: 1) },
@@ -186,7 +183,7 @@ struct EPubReaderView: View {
                 toggleReadAloud()
             }
             #endif
-            .onChange(of: searchQuery) { _, newQuery in
+            .onChange(of: search.query) { _, newQuery in
                 performEPubSearch(newQuery)
             }
     }
@@ -266,17 +263,17 @@ struct EPubReaderView: View {
         #endif
         .preferredColorScheme(readingPrefs.effective(for: fileHash).theme.preferredColorScheme)
         .escapeDismisses(
-            searchShowing: { showSearch },
+            searchShowing: { search.isShowing },
             dismissSearch: dismissSearch,
             showChrome: $showChrome
         )
         .overlay(alignment: .top) {
-            if showSearch {
+            if search.isShowing {
                 SearchBarView(
-                    query: $searchQuery,
-                    isSearching: $isSearching,
+                    query: $search.query,
+                    isSearching: $search.isSearching,
                     resultCount: searchResults.count,
-                    currentResult: searchResults.isEmpty ? 0 : currentSearchIndex + 1,
+                    currentResult: searchResults.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateSearchResult(forward: true) },
                     onPrevious: { navigateSearchResult(forward: false) },
                     onDismiss: { dismissSearch() }
@@ -285,7 +282,7 @@ struct EPubReaderView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: showSearch)
+        .animation(.easeInOut(duration: 0.2), value: search.isShowing)
         #if os(iOS) || os(visionOS)
         // Overlay top bar (covers text, no reflow)
         .overlay(alignment: .top) {
@@ -351,9 +348,9 @@ struct EPubReaderView: View {
                 },
                 onSearchResult: { results, done in
                     searchResults = results
-                    if done { isSearching = false }
-                    if !results.isEmpty && currentSearchIndex >= results.count {
-                        currentSearchIndex = 0
+                    if done { search.isSearching = false }
+                    if !results.isEmpty && search.currentIndex >= results.count {
+                        search.currentIndex = 0
                     }
                 },
                 onReadAloudSectionText: readAloudSectionTextHandler,
@@ -435,7 +432,7 @@ struct EPubReaderView: View {
         }
 
         ToolbarItem(placement: .automatic) {
-            Button { showSearch.toggle(); if !showSearch { dismissSearch() } } label: {
+            Button { search.isShowing.toggle(); if !search.isShowing { dismissSearch() } } label: {
                 Label("Search", systemImage: "magnifyingglass")
             }
         }
@@ -488,7 +485,7 @@ struct EPubReaderView: View {
                         Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
                               systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                     }
-                    Button { showSearch.toggle(); if !showSearch { dismissSearch() } } label: {
+                    Button { search.isShowing.toggle(); if !search.isShowing { dismissSearch() } } label: {
                         Label("Search", systemImage: "magnifyingglass")
                     }
                 }
@@ -654,34 +651,31 @@ struct EPubReaderView: View {
         guard !query.isEmpty else {
             webViewProxy.clearSearch?()
             searchResults = []
-            currentSearchIndex = 0
-            isSearching = false
+            search.currentIndex = 0
+            search.isSearching = false
             return
         }
-        isSearching = true
+        search.isSearching = true
         searchResults = []
-        currentSearchIndex = 0
+        search.currentIndex = 0
         webViewProxy.search?(query)
     }
 
     private func navigateSearchResult(forward: Bool) {
         guard !searchResults.isEmpty else { return }
         if forward {
-            currentSearchIndex = (currentSearchIndex + 1) % searchResults.count
+            search.currentIndex = (search.currentIndex + 1) % searchResults.count
         } else {
-            currentSearchIndex = (currentSearchIndex - 1 + searchResults.count) % searchResults.count
+            search.currentIndex = (search.currentIndex - 1 + searchResults.count) % searchResults.count
         }
-        if let cfi = searchResults[currentSearchIndex]["cfi"] {
+        if let cfi = searchResults[search.currentIndex]["cfi"] {
             webViewProxy.goToSearchResult?(cfi)
         }
     }
 
     private func dismissSearch() {
-        showSearch = false
-        searchQuery = ""
+        search.reset()
         searchResults = []
-        currentSearchIndex = 0
-        isSearching = false
         webViewProxy.clearSearch?()
     }
 
