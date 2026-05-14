@@ -52,6 +52,7 @@ struct TextReaderView: View {
     // Search state
     @State private var search = ReaderSearchState()
     @State private var searchMatchOffsets: [Range<String.Index>] = []
+    @State private var searchDebouncer = SearchDebouncer()
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -247,7 +248,7 @@ struct TextReaderView: View {
             }
             #endif
             .onChange(of: search.query) { _, newQuery in
-                performTextSearch(newQuery)
+                searchDebouncer.handle(newQuery, perform: performTextSearch, clear: clearTextSearch)
             }
     }
 
@@ -343,7 +344,8 @@ struct TextReaderView: View {
                     currentResult: searchMatchOffsets.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateTextSearchResult(forward: true) },
                     onPrevious: { navigateTextSearchResult(forward: false) },
-                    onDismiss: { dismissTextSearch() }
+                    onDismiss: { dismissTextSearch() },
+                    minQueryLength: searchDebouncer.minLength
                 )
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -779,12 +781,6 @@ struct TextReaderView: View {
     // MARK: - Search
 
     private func performTextSearch(_ query: String) {
-        guard !query.isEmpty else {
-            searchMatchOffsets = []
-            search.currentIndex = 0
-            search.isSearching = false
-            return
-        }
         search.isSearching = true
         let text = rawText
         let lowered = text.lowercased()
@@ -801,6 +797,12 @@ struct TextReaderView: View {
         if !ranges.isEmpty {
             scrollToSearchMatch(at: 0)
         }
+    }
+
+    private func clearTextSearch() {
+        searchMatchOffsets = []
+        search.currentIndex = 0
+        search.isSearching = false
     }
 
     private func navigateTextSearchResult(forward: Bool) {
@@ -836,6 +838,7 @@ struct TextReaderView: View {
     }
 
     private func dismissTextSearch() {
+        searchDebouncer.cancel()
         search.reset()
         searchMatchOffsets = []
     }

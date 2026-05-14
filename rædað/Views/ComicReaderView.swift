@@ -42,6 +42,8 @@ struct ComicReaderView: View {
     // Search state
     @State private var search = ReaderSearchState()
     @State private var searchMatchPages: [Int] = []
+    @State private var searchDebouncer = SearchDebouncer()
+    @State private var ocrSearchTask: Task<Void, Never>?
     @State private var ocrPagesScanned = 0
 
     @FocusState private var isFocused: Bool
@@ -109,7 +111,7 @@ struct ComicReaderView: View {
                 readingDirection = readingDirection == .leftToRight ? .rightToLeft : .leftToRight
             }
             .onChange(of: search.query) { _, newQuery in
-                performComicSearch(newQuery)
+                searchDebouncer.handle(newQuery, perform: performComicSearch, clear: clearComicSearch)
             }
     }
 
@@ -190,7 +192,8 @@ struct ComicReaderView: View {
                     currentResult: searchMatchPages.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateComicSearchResult(forward: true) },
                     onPrevious: { navigateComicSearchResult(forward: false) },
-                    onDismiss: { dismissComicSearch() }
+                    onDismiss: { dismissComicSearch() },
+                    minQueryLength: searchDebouncer.minLength
                 )
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -563,37 +566,47 @@ struct ComicReaderView: View {
     // MARK: - Search (OCR)
 
     private func performComicSearch(_ query: String) {
-        guard !query.isEmpty else {
-            searchMatchPages = []
-            search.currentIndex = 0
-            search.isSearching = false
-            ocrPagesScanned = 0
-            return
-        }
+        // Cancel any in-flight OCR scan from a previous query.
+        ocrSearchTask?.cancel()
+        ocrSearchTask = nil
+
         search.isSearching = true
         searchMatchPages = []
         search.currentIndex = 0
         ocrPagesScanned = 0
 
-        Task {
+        ocrSearchTask = Task {
             var matches: [Int] = []
             for i in 0..<archive.pageCount {
+                if Task.isCancelled { return }
                 let contains = await OCRService.shared.pageContains(imageURL: archive.pages[i], query: query)
+                if Task.isCancelled { return }
                 if contains {
                     matches.append(i)
                 }
                 await MainActor.run {
+                    if Task.isCancelled { return }
                     ocrPagesScanned = i + 1
                     searchMatchPages = matches
                 }
             }
             await MainActor.run {
+                if Task.isCancelled { return }
                 search.isSearching = false
                 if let first = matches.first {
                     currentPage = first
                 }
             }
         }
+    }
+
+    private func clearComicSearch() {
+        ocrSearchTask?.cancel()
+        ocrSearchTask = nil
+        searchMatchPages = []
+        search.currentIndex = 0
+        search.isSearching = false
+        ocrPagesScanned = 0
     }
 
     private func navigateComicSearchResult(forward: Bool) {
@@ -607,6 +620,9 @@ struct ComicReaderView: View {
     }
 
     private func dismissComicSearch() {
+        searchDebouncer.cancel()
+        ocrSearchTask?.cancel()
+        ocrSearchTask = nil
         search.reset()
         searchMatchPages = []
         ocrPagesScanned = 0

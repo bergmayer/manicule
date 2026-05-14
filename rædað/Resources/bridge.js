@@ -52,6 +52,11 @@ let readAloudLastPage = -1
 let readAloudSeekTimer = null
 let readAloudUserFlipUntil = 0
 
+// Incremented on every bridge.search() and bridge.clearSearch() so the async
+// generator can detect that a newer query (or dismissal) has superseded it
+// and stop posting partial results.
+let searchGeneration = 0
+
 // --- Center-based viewport anchor for resize stability ---
 // Tracks the text at the vertical center of the visible page. On resize
 // (chrome show/hide), sets this as the paginator's anchor so that after
@@ -1122,24 +1127,35 @@ window.bridge = {
     },
 
     async search(query) {
+        // Generation counter — every new search or clear bumps it. The
+        // async iterator below checks `myGen === searchGeneration` before
+        // posting, so results from a superseded search never reach Swift
+        // (avoids partial counts from "e" landing after the real query).
+        const myGen = ++searchGeneration
         try {
             view.clearSearch()
             const results = []
             for await (const item of view.search({ query })) {
+                if (myGen !== searchGeneration) return
                 if (item === 'done') break
                 for (const sub of (item.subitems || [])) {
                     results.push({ cfi: sub.cfi, excerpt: sub.excerpt, label: item.label })
                 }
                 post({ type: 'searchResult', results: results.slice(), done: false })
             }
-            post({ type: 'searchResult', results, done: true })
+            if (myGen === searchGeneration) {
+                post({ type: 'searchResult', results, done: true })
+            }
         } catch (e) {
             console.error('search failed:', e)
-            post({ type: 'searchResult', results: [], done: true })
+            if (myGen === searchGeneration) {
+                post({ type: 'searchResult', results: [], done: true })
+            }
         }
     },
 
     clearSearch() {
+        searchGeneration++  // invalidate any in-flight search
         try { view.clearSearch() } catch (e) {}
     },
 

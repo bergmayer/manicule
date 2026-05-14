@@ -48,6 +48,8 @@ struct PDFReaderView: View {
     @State private var searchSelections: [PDFSelection] = []
     @State private var ocrMatchPages: [Int] = []
     @State private var usingOCR = false
+    @State private var searchDebouncer = SearchDebouncer()
+    @State private var ocrSearchTask: Task<Void, Never>?
 
     @FocusState private var isFocused: Bool
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -114,7 +116,7 @@ struct PDFReaderView: View {
                 showGoToPage = true
             }
             .onChange(of: search.query) { _, newQuery in
-                performPdfSearch(newQuery)
+                searchDebouncer.handle(newQuery, perform: performPdfSearch, clear: clearPdfSearch)
             }
             .onChange(of: currentPageIndex) { _, newPage in
                 if trimWhitespace && usesCropBoxTrimming && isPaginated { trimPagesAround(newPage) }
@@ -216,7 +218,8 @@ struct PDFReaderView: View {
                     currentResult: pdfSearchResultCount == 0 ? 0 : search.currentIndex + 1,
                     onNext: { navigatePdfSearchResult(forward: true) },
                     onPrevious: { navigatePdfSearchResult(forward: false) },
-                    onDismiss: { dismissPdfSearch() }
+                    onDismiss: { dismissPdfSearch() },
+                    minQueryLength: searchDebouncer.minLength
                 )
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -587,14 +590,14 @@ struct PDFReaderView: View {
     }
 
     private func performPdfSearch(_ query: String) {
-        guard let doc = pdfDocument, !query.isEmpty else {
-            searchSelections = []
-            ocrMatchPages = []
-            usingOCR = false
-            search.currentIndex = 0
-            search.isSearching = false
+        guard let doc = pdfDocument else {
+            clearPdfSearch()
             return
         }
+        // Cancel any in-flight OCR scan from a previous query.
+        ocrSearchTask?.cancel()
+        ocrSearchTask = nil
+
         search.isSearching = true
         usingOCR = false
         ocrMatchPages = []
@@ -616,10 +619,21 @@ struct PDFReaderView: View {
         }
     }
 
+    private func clearPdfSearch() {
+        ocrSearchTask?.cancel()
+        ocrSearchTask = nil
+        searchSelections = []
+        ocrMatchPages = []
+        usingOCR = false
+        search.currentIndex = 0
+        search.isSearching = false
+    }
+
     private func performOCRPdfSearch(_ query: String, doc: PDFDocument) {
-        Task {
+        ocrSearchTask = Task {
             var matches: [Int] = []
             for i in 0..<doc.pageCount {
+                if Task.isCancelled { return }
                 guard let page = doc.page(at: i) else { continue }
                 let bounds = page.bounds(for: .mediaBox)
                 let size = CGSize(width: min(bounds.width * 2, 2000), height: min(bounds.height * 2, 2000))
@@ -641,14 +655,16 @@ struct PDFReaderView: View {
                 #endif
 
                 let contains = await OCRService.shared.pageContains(imageURL: tmpURL, query: query)
+                if Task.isCancelled { return }
                 if contains {
                     matches.append(i)
                 }
                 await MainActor.run {
-                    ocrMatchPages = matches
+                    if !Task.isCancelled { ocrMatchPages = matches }
                 }
             }
             await MainActor.run {
+                if Task.isCancelled { return }
                 search.isSearching = false
                 if let first = matches.first {
                     currentPageIndex = first
@@ -681,6 +697,9 @@ struct PDFReaderView: View {
     }
 
     private func dismissPdfSearch() {
+        searchDebouncer.cancel()
+        ocrSearchTask?.cancel()
+        ocrSearchTask = nil
         search.reset()
         searchSelections = []
         ocrMatchPages = []

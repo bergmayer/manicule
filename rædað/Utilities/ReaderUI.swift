@@ -133,6 +133,60 @@ struct ReaderSearchState: Equatable {
     }
 }
 
+/// Debounces query-change events so search backends (foliate-js generator,
+/// PDFKit findString, OCR) don't run on every keystroke. Each reader owns
+/// one of these and routes `.onChange(of: search.query)` through it.
+///
+/// Semantics:
+///   - Trimmed query length < `minLength` → invokes `clear` immediately and
+///     cancels any pending search (prevents "tally up every 'e'").
+///   - Otherwise, cancels the in-flight delay and schedules `perform` after
+///     `debounceMilliseconds`.
+///   - `submit(query:)` runs `perform` now, skipping the wait (Enter key).
+///   - `cancel()` aborts the pending delay; call from dismiss handlers.
+@Observable @MainActor
+final class SearchDebouncer {
+    var debounceMilliseconds: Int = 300
+    var minLength: Int = 2
+
+    private var task: Task<Void, Never>?
+
+    func handle(
+        _ query: String,
+        perform: @escaping (String) -> Void,
+        clear: @escaping () -> Void
+    ) {
+        task?.cancel()
+        task = nil
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= minLength else {
+            clear()
+            return
+        }
+        task = Task { @MainActor [debounceMilliseconds] in
+            try? await Task.sleep(for: .milliseconds(debounceMilliseconds))
+            if Task.isCancelled { return }
+            perform(trimmed)
+        }
+    }
+
+    func submit(
+        _ query: String,
+        perform: @escaping (String) -> Void
+    ) {
+        task?.cancel()
+        task = nil
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= minLength else { return }
+        perform(trimmed)
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
 // MARK: - Escape Dismissal
 
 private struct EscapeDismissModifier: ViewModifier {

@@ -63,6 +63,7 @@ struct EPubReaderView: View {
     // Search state
     @State private var search = ReaderSearchState()
     @State private var searchResults: [[String: String]] = []
+    @State private var searchDebouncer = SearchDebouncer()
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -184,7 +185,7 @@ struct EPubReaderView: View {
             }
             #endif
             .onChange(of: search.query) { _, newQuery in
-                performEPubSearch(newQuery)
+                searchDebouncer.handle(newQuery, perform: performEPubSearch, clear: clearEPubSearch)
             }
     }
 
@@ -276,7 +277,8 @@ struct EPubReaderView: View {
                     currentResult: searchResults.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateSearchResult(forward: true) },
                     onPrevious: { navigateSearchResult(forward: false) },
-                    onDismiss: { dismissSearch() }
+                    onDismiss: { dismissSearch() },
+                    minQueryLength: searchDebouncer.minLength
                 )
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -648,17 +650,17 @@ struct EPubReaderView: View {
     // MARK: - Search
 
     private func performEPubSearch(_ query: String) {
-        guard !query.isEmpty else {
-            webViewProxy.clearSearch?()
-            searchResults = []
-            search.currentIndex = 0
-            search.isSearching = false
-            return
-        }
         search.isSearching = true
         searchResults = []
         search.currentIndex = 0
         webViewProxy.search?(query)
+    }
+
+    private func clearEPubSearch() {
+        webViewProxy.clearSearch?()
+        searchResults = []
+        search.currentIndex = 0
+        search.isSearching = false
     }
 
     private func navigateSearchResult(forward: Bool) {
@@ -674,6 +676,7 @@ struct EPubReaderView: View {
     }
 
     private func dismissSearch() {
+        searchDebouncer.cancel()
         search.reset()
         searchResults = []
         webViewProxy.clearSearch?()

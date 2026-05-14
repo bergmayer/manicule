@@ -62,6 +62,14 @@ struct PerBookSettingsView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.fileName).lineLimit(1)
+                if let path = displayPath(for: entry) {
+                    Text(path)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
                 HStack(spacing: 6) {
                     Text(entry.position.displayString)
                         .font(.caption)
@@ -94,6 +102,14 @@ struct PerBookSettingsView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.fileName).lineLimit(1)
+                if let path = displayPath(for: entry) {
+                    Text(path)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
                 HStack(spacing: 6) {
                     Text(entry.position.displayString)
                         .font(.caption)
@@ -137,5 +153,46 @@ struct PerBookSettingsView: View {
             }
             .buttonStyle(.borderless)
         }
+    }
+
+    /// Choose the most useful path representation for display.
+    ///
+    /// Preference order:
+    ///   1. `relativePathHint` — cloud-provider-relative ("Books/MyBook.epub").
+    ///      Stable across devices and the cleanest form to read.
+    ///   2. `filePathString` — full path. We collapse the home directory to
+    ///      `~`, and trim provider-storage prefixes so users see the part
+    ///      they recognize rather than `/private/var/mobile/Containers/…`.
+    ///   3. Nothing if neither is stored (very old entries pre-path-tracking).
+    private func displayPath(for entry: AutoSavedPosition) -> String? {
+        if let hint = entry.relativePathHint, !hint.isEmpty {
+            return cleanedPath(hint)
+        }
+        if let full = entry.filePathString, !full.isEmpty {
+            return cleanedPath(abbreviate(fullPath: full))
+        }
+        return nil
+    }
+
+    private func abbreviate(fullPath: String) -> String {
+        let home = NSHomeDirectory()
+        if !home.isEmpty, fullPath.hasPrefix(home) {
+            return "~" + fullPath.dropFirst(home.count)
+        }
+        return fullPath
+    }
+
+    /// Drop the trailing file name (it's already shown as the row title) and
+    /// strip a leading slash so the directory reads cleanly. Returns nil-ish
+    /// (empty) handling deferred to the caller via `isEmpty` check above.
+    private func cleanedPath(_ path: String) -> String {
+        var p = path
+        if let slash = p.lastIndex(of: "/") {
+            p = String(p[..<slash])
+        } else {
+            return ""
+        }
+        if p.hasPrefix("/") { p.removeFirst() }
+        return p
     }
 }

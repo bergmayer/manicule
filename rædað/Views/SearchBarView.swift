@@ -10,8 +10,19 @@ struct SearchBarView: View {
     let onNext: () -> Void
     let onPrevious: () -> Void
     let onDismiss: () -> Void
+    /// Minimum query length before the search backend runs. Used to display
+    /// a hint instead of "No results" while the user is still typing.
+    var minQueryLength: Int = 0
 
     @FocusState private var isFocused: Bool
+
+    private var trimmedQueryLength: Int {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).count
+    }
+
+    private var isWaitingForLongerQuery: Bool {
+        minQueryLength > 0 && trimmedQueryLength > 0 && trimmedQueryLength < minQueryLength
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -35,6 +46,10 @@ struct SearchBarView: View {
                 Text("\(currentResult)/\(resultCount)")
                     .font(.caption)
                     .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            } else if isWaitingForLongerQuery {
+                Text("Keep typing…")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             } else if !query.isEmpty && !isSearching {
                 Text("No results")
