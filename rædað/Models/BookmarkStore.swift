@@ -18,6 +18,7 @@ final class BookmarkStore {
     private static let iCloudKey = "raedad.bookmarks"
     private static let autoSaveKey = "raedad.autoSavedPositions"
     private static let urlBookmarksKey = "raedad.urlBookmarks"
+    private static let fileProviderRefsKey = "raedad.fileProviderRefs"
     private static let maxBookmarksPerBook = 12
     static let maxRecentBooks = 12
     static let maxPinnedBooks = 60
@@ -25,6 +26,12 @@ final class BookmarkStore {
     /// Device-local security-scoped URL bookmarks keyed by fileHash.
     /// These allow reopening files from the Recents list without re-picking.
     private var urlBookmarks: [String: Data] = [:]
+    /// Device-local FileProvider references keyed by fileHash. Captured on
+    /// iOS for files vended by a File Provider extension (Nextcloud, iCloud
+    /// Drive, Dropbox, etc.). Unlike URL bookmarks, these resolve reliably
+    /// across app launches for third-party providers — the provider extension
+    /// re-vends a fresh URL with a fresh security scope on each resolve.
+    private var fileProviderRefs: [String: FileProviderRef] = [:]
 
     private static let bookmarkMigrationKey = "raedad.urlBookmarksMigrated_v2"
 
@@ -32,6 +39,7 @@ final class BookmarkStore {
         self.entries = Self.loadFromCloud()
         self.autoSavedPositions = Self.loadAutoSaved()
         self.urlBookmarks = Self.loadURLBookmarks()
+        self.fileProviderRefs = Self.loadFileProviderRefs()
 
         // One-time migration: clear bookmarks saved with .minimalBookmark (broken security scope)
         if !UserDefaults.standard.bool(forKey: Self.bookmarkMigrationKey) {
@@ -315,6 +323,10 @@ final class BookmarkStore {
     // MARK: - URL Bookmark Storage (device-local)
 
     /// Save a security-scoped URL bookmark so the file can be reopened from Recents.
+    ///
+    /// On iOS, `.withSecurityScope` is unavailable — security scope is captured
+    /// implicitly when the URL came from `UIDocumentPicker`. On macOS the option
+    /// is required for sandboxed access across launches.
     func saveURLBookmark(for fileURL: URL, fileHash: String) {
         do {
             #if os(iOS)
@@ -329,7 +341,6 @@ final class BookmarkStore {
             persistURLBookmarks()
             Self.logger.info("Saved URL bookmark for \(fileURL.lastPathComponent, privacy: .public) (\(data.count) bytes)")
 
-            // Verify immediately
             var stale = false
             #if os(iOS)
             let resolved = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale)
@@ -375,9 +386,13 @@ final class BookmarkStore {
             }
             return url
         } catch {
+            // Keep the bookmark on transient failures. Third-party file
+            // providers can throw at cold boot before their extension is
+            // registered/signed-in; if we deleted on every failure, the
+            // FileProvider-identifier route (the other recovery path) would
+            // be our only remaining shot, and we'd lose iCloud's fast path
+            // forever after one bad resolve.
             Self.logger.error("FAILED to resolve URL bookmark for hash \(fileHash.prefix(8), privacy: .public): \(error.localizedDescription, privacy: .public)")
-            urlBookmarks.removeValue(forKey: fileHash)
-            persistURLBookmarks()
             return nil
         }
     }
@@ -396,4 +411,58 @@ final class BookmarkStore {
     private static func loadURLBookmarks() -> [String: Data] {
         UserDefaults.standard.dictionary(forKey: urlBookmarksKey) as? [String: Data] ?? [:]
     }
+
+    // MARK: - FileProvider Reference Storage (device-local, iOS-only effective)
+
+    /// Save a FileProvider domain+item identifier so we can ask the provider
+    /// extension to re-vend a fresh URL on later opens. This is the path that
+    /// works for third-party providers like Nextcloud, where plain
+    /// `URL.bookmarkData()` round-trips don't reliably grant scope across
+    /// launches.
+    func saveFileProviderRef(domain: String, item: String, fileHash: String) {
+        fileProviderRefs[fileHash] = FileProviderRef(domain: domain, item: item)
+        persistFileProviderRefs()
+        Self.logger.info("Saved FileProvider ref: domain=\(domain, privacy: .public), itemPrefix=\(item.prefix(16), privacy: .public)")
+    }
+
+    /// Look up a stored FileProvider reference for this file hash.
+    func fileProviderRef(for fileHash: String) -> FileProviderRef? {
+        fileProviderRefs[fileHash]
+    }
+
+    /// Drop the FileProvider ref for a file hash (e.g. after the user clears it
+    /// or after a definitive provider failure).
+    func removeFileProviderRef(for fileHash: String) {
+        guard fileProviderRefs.removeValue(forKey: fileHash) != nil else { return }
+        persistFileProviderRefs()
+    }
+
+    /// Clear all stored FileProvider refs (used by the Clear All settings action).
+    func clearAllFileProviderRefs() {
+        fileProviderRefs.removeAll()
+        persistFileProviderRefs()
+        Self.logger.info("Cleared all FileProvider refs")
+    }
+
+    private func persistFileProviderRefs() {
+        if let data = try? JSONEncoder().encode(fileProviderRefs) {
+            UserDefaults.standard.set(data, forKey: Self.fileProviderRefsKey)
+        }
+    }
+
+    private static func loadFileProviderRefs() -> [String: FileProviderRef] {
+        guard let data = UserDefaults.standard.data(forKey: fileProviderRefsKey),
+              let decoded = try? JSONDecoder().decode([String: FileProviderRef].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+}
+
+/// Reference to a file vended by a File Provider extension.
+/// Device-local — domain identifiers can differ across devices even for the
+/// same provider account, so this is never synced via iCloud.
+struct FileProviderRef: Codable, Sendable, Equatable {
+    let domain: String
+    let item: String
 }

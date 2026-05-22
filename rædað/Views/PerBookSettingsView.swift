@@ -48,6 +48,7 @@ struct PerBookSettingsView: View {
                 bookmarkStore.clearAll()
                 bookmarkStore.clearAllAutoSaved()
                 bookmarkStore.clearAllURLBookmarks()
+                bookmarkStore.clearAllFileProviderRefs()
             }
             Button("Cancel", role: .cancel) { }
         } message: {

@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import UniformTypeIdentifiers
+import FileProvider
 import os.log
 
 private let browserLog = Logger(subsystem: "com.palefire.raedad", category: "Browser")
@@ -96,6 +97,7 @@ struct IOSRootView: View {
         .sheet(isPresented: $showSettings) {
             IOSSettingsView()
         }
+        .task { await FileProviderPrimer.startPrewarm() }
     }
 
     // MARK: - Library View
@@ -111,7 +113,7 @@ struct IOSRootView: View {
                 } else {
                     RecentsGridSection(
                         books: trackedBooks,
-                        onTap: { entry in openRecentBook(entry) },
+                        onTap: { entry in Task { await openRecentBook(entry) } },
                         onRemove: { entry in removeFromList(entry) }
                     )
                 }
@@ -165,16 +167,29 @@ struct IOSRootView: View {
     @State private var pickerDirectoryURL: URL?
     @State private var pickerFileName: String?
 
-    private func openRecentBook(_ entry: AutoSavedPosition) {
+    private func openRecentBook(_ entry: AutoSavedPosition) async {
         browserLog.info("openRecentBook: \(entry.fileName, privacy: .public), path=\(entry.filePathString ?? "nil", privacy: .public), hint=\(entry.relativePathHint ?? "nil", privacy: .public)")
 
-        // 1. Try device-local URL bookmark (instant if previously opened on this device)
+        // 1. Try device-local URL bookmark (instant if previously opened on this device).
+        //    Works well for iCloud Drive; unreliable for third-party file providers.
         if let url = BookmarkStore.shared.resolveURL(for: entry.id) {
             openDocument(at: url)
             return
         }
 
-        // 2. Try direct file access at synced paths (sometimes works for local iCloud files)
+        // 2. Ask the FileProvider extension to vend a fresh URL via the
+        //    captured (domain, item) identifier. This is the path that works
+        //    for Nextcloud, Dropbox, etc. — the provider extension re-applies
+        //    a fresh security scope each time, so it survives reboots and
+        //    extension restarts.
+        if let ref = BookmarkStore.shared.fileProviderRef(for: entry.id),
+           let url = await FileProviderPrimer.resolveFileProviderURL(ref) {
+            browserLog.info("FileProvider resolved to \(url.lastPathComponent, privacy: .public)")
+            openDocument(at: url)
+            return
+        }
+
+        // 3. Try direct file access at synced paths (sometimes works for local iCloud files)
         for url in Self.candidateURLs(for: entry) {
             if url.startAccessingSecurityScopedResource() || FileManager.default.isReadableFile(atPath: url.path) {
                 browserLog.info("Direct access at \(url.path, privacy: .public)")
@@ -183,7 +198,7 @@ struct IOSRootView: View {
             }
         }
 
-        // 3. Present a document picker pointed at the file's parent folder.
+        // 4. Present a document picker pointed at the file's parent folder.
         //    iOS requires the user to tap the file once to grant access.
         //    The picker opens in the right folder — one tap to open.
         if let dirURL = Self.parentDirectoryURL(for: entry) {
@@ -193,11 +208,10 @@ struct IOSRootView: View {
             return
         }
 
-        // 4. No path info at all — open a general picker
+        // 5. No path info at all — open a general picker
         browserLog.info("No path info, presenting general picker")
         pickerFileName = entry.fileName
         pickerDirectoryURL = URL(fileURLWithPath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/")
-        return
     }
 
     /// Build candidate file URLs from all synced path information.
@@ -264,6 +278,7 @@ struct IOSRootView: View {
             BookmarkStore.shared.saveURLBookmark(for: url, fileHash: hash)
             BookmarkStore.shared.updatePathHint(for: hash, url: url)
             CoverThumbnailCache.shared.generateIfNeeded(for: content, fileHash: hash)
+            Task { await FileProviderPrimer.captureFileProviderRef(url: url, fileHash: hash) }
             browserLog.info("Document opened successfully: \(url.lastPathComponent, privacy: .public)")
         } catch {
             browserLog.error("Failed to open: \(error.localizedDescription, privacy: .public)")
@@ -331,6 +346,8 @@ private struct RecentsGridSection: View {
     let onTap: (AutoSavedPosition) -> Void
     var onRemove: ((AutoSavedPosition) -> Void)?
 
+    @State private var showHelp = false
+
     private let columns = [GridItem(.adaptive(minimum: 90, maximum: 120), spacing: 14)]
 
     var body: some View {
@@ -347,11 +364,25 @@ private struct RecentsGridSection: View {
                     .padding(.bottom, 24)
 
                 // Section header — left-aligned, system style
-                Text("Recently Opened and Bookmarked")
-                    .font(.title3.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal)
-                    .padding(.bottom, 12)
+                HStack(spacing: 6) {
+                    Text("Recently Opened and Bookmarked")
+                        .font(.title3.weight(.semibold))
+                    Button {
+                        showHelp = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("About Recent Books")
+                    .popover(isPresented: $showHelp) {
+                        recentsHelpContent
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 12)
 
                 // Book grid
                 LazyVGrid(columns: columns, spacing: 16) {
@@ -372,6 +403,21 @@ private struct RecentsGridSection: View {
                 .padding(.bottom, 16)
             }
         }
+    }
+
+    private var recentsHelpContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("About Recent Books")
+                .font(.headline)
+            Text("The first time you open a book on a new device you need to locate it in the file picker.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("With some third-party file providers, you may be presented with the file picker when you shouldn't be. If you dismiss it and try again, the book might open.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(20)
+        .frame(width: 320)
+        .presentationCompactAdaptation(.popover)
     }
 }
 
