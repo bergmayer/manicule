@@ -282,6 +282,16 @@ struct EffectivePreferences: Sendable {
         css += """
 
         }
+        sup, sub {
+            font-size: 0.75em !important;
+            line-height: 0 !important;
+        }
+        sup *, sub * {
+            font-size: inherit !important;
+            line-height: inherit !important;
+        }
+        sup, sup * { vertical-align: super !important; }
+        sub, sub * { vertical-align: sub !important; }
         """
 
         if let bgColor = theme.cssBackground, let textColor = theme.cssForeground {

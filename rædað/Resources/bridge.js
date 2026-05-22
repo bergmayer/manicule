@@ -456,7 +456,29 @@ view.addEventListener('load', ({ detail: { doc } }) => {
 
     // Keyboard navigation within iframe documents
     doc.addEventListener('keydown', handleKeydown)
+
+    shrinkSuperscripts(doc)
 })
+
+// Many ePubs mark footnote references with publisher-specific classes/roles
+// (e.g. <a class="noteref">449</a>, <a epub:type="noteref">...</a>) and rely
+// on CSS `vertical-align: super` to raise them. Our user stylesheet forces
+// `font-size` on common text elements, which leaves these references at full
+// body size — visually elevated but jarringly large. Rather than guess every
+// publisher's class names, walk inline elements and shrink anything the
+// document has computed as super/sub.
+function shrinkSuperscripts(doc) {
+    const view = doc.defaultView
+    if (!view) return
+    const candidates = doc.querySelectorAll('a, span, sup, sub, small, b, i, em, strong')
+    for (const el of candidates) {
+        const va = view.getComputedStyle(el).verticalAlign
+        if (va === 'super' || va === 'sub') {
+            el.style.setProperty('font-size', '0.75em', 'important')
+            el.style.setProperty('line-height', '0', 'important')
+        }
+    }
+}
 
 // Shared keyboard handler for both iframe and host document navigation
 function handleKeydown(e) {

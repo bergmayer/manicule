@@ -151,13 +151,11 @@ struct ReadingSettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                #if os(iOS) || os(visionOS)
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         applyAndDismiss()
                     }
                 }
-                #endif
             }
             .task {
                 loadCurrentValues()
