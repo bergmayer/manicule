@@ -637,9 +637,7 @@ struct TextReaderView: View {
     // MARK: - Toolbar
 
     private var currentModeIcon: String {
-        if !isPaginated { return "scroll.fill" }
-        if effectiveTwoUp { return "rectangle.split.2x1.fill" }
-        return "rectangle.fill"
+        ReaderHelpers.viewModeIcon(isPaginated: isPaginated, twoUpOverride: twoUpOverride)
     }
 
     @ToolbarContentBuilder

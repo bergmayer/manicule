@@ -378,7 +378,7 @@ struct EPubReaderView: View {
     // MARK: - Toolbar
 
     private var currentModeIcon: String {
-        ReaderHelpers.viewModeIcon(isPaginated: isPaginated, isTwoUp: effectiveTwoUp)
+        ReaderHelpers.viewModeIcon(isPaginated: isPaginated, twoUpOverride: twoUpOverride)
     }
 
     #if os(macOS)

@@ -658,7 +658,7 @@ struct ComicReaderView: View {
     }
 
     private var currentModeIcon: String {
-        ReaderHelpers.viewModeIcon(isPaginated: isPaginated, isTwoUp: effectiveTwoUp)
+        ReaderHelpers.viewModeIcon(isPaginated: isPaginated, twoUpOverride: twoUpOverride)
     }
 
     // MARK: - Toolbar

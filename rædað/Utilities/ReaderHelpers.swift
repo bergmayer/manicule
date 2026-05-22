@@ -59,11 +59,26 @@ enum ReaderHelpers {
 
     // MARK: - View Mode Icon
 
-    /// Returns the SF Symbol name for the current view mode state.
-    static func viewModeIcon(isPaginated: Bool, isTwoUp: Bool) -> String {
-        if !isPaginated { return "scroll.fill" }
-        if isTwoUp { return "rectangle.split.2x1.fill" }
-        return "rectangle.fill"
+    /// Returns the SF Symbol name for the current view mode state, matching
+    /// the icons in `ViewModeMenuButtons` so the toolbar's menu trigger
+    /// shows the same glyph as the option that's actually selected.
+    /// `twoUpOverride == nil` indicates "Automatic" — not yet resolved to
+    /// single or two-up.
+    static func viewModeIcon(isPaginated: Bool, twoUpOverride: Bool?) -> String {
+        if !isPaginated { return "scroll" }
+        switch twoUpOverride {
+        case .none:
+            // macOS doesn't expose the Automatic option — fall back to the
+            // single-page icon so a nil state (e.g. synced from iOS) doesn't
+            // show a glyph the user can't reproduce from the menu.
+            #if os(macOS)
+            return "rectangle"
+            #else
+            return "shuffle"
+            #endif
+        case .some(true): return "rectangle.split.2x1"
+        case .some(false): return "rectangle"
+        }
     }
 
     // MARK: - Bookmark Helpers

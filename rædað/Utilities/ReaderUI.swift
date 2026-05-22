@@ -17,7 +17,12 @@ struct ViewModeMenuButtons: View {
 
     var body: some View {
         Group {
-            Button { onAutomatic() } label: { Label("Automatic", systemImage: "rectangle.portrait.and.arrow.right") }
+            #if !os(macOS)
+            // Automatic resolves to single or two-up based on orientation,
+            // which only matters on devices that rotate. On macOS the
+            // window-size heuristic is a worse fit than picking explicitly.
+            Button { onAutomatic() } label: { Label("Automatic", systemImage: "shuffle") }
+            #endif
             Button { onSinglePage() } label: { Label("Single Page", systemImage: "rectangle") }
             Button { onTwoPage() } label: { Label("Two Pages", systemImage: "rectangle.split.2x1") }
             Button { onScrolling() } label: { Label(scrollingLabel, systemImage: scrollingIcon) }
