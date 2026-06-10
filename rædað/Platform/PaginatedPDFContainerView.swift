@@ -11,6 +11,9 @@ struct PaginatedPDFContainerView: View {
     @Binding var currentPage: Int
     let twoUp: Bool
     var trimWhitespace: Bool = false
+    /// Identifies the document in the shared trim cache so equal page indices
+    /// from different PDFs don't collide. Pass the file hash.
+    var documentKey: String = "doc"
     let onToggleChrome: () -> Void
 
     var body: some View {
@@ -31,7 +34,8 @@ struct PaginatedPDFContainerView: View {
                 pdfDocument: pdfDocument,
                 pageIndex: index,
                 secondPageIndex: secondIndex,
-                trimWhitespace: trimWhitespace
+                trimWhitespace: trimWhitespace,
+                documentKey: documentKey
             )
         }
     }
@@ -43,6 +47,7 @@ class PDFPageSpreadViewController: UIViewController, UIScrollViewDelegate, Pagin
     let pageIndex: Int
     let secondPageIndex: Int?
     let trimWhitespace: Bool
+    let documentKey: String
 
     private var scrollView: UIScrollView!
     private var contentView: UIView!
@@ -50,11 +55,12 @@ class PDFPageSpreadViewController: UIViewController, UIScrollViewDelegate, Pagin
     private var secondaryImageView: UIImageView?
     private var hasRendered = false
 
-    init(pdfDocument: PDFDocument, pageIndex: Int, secondPageIndex: Int?, trimWhitespace: Bool = false) {
+    init(pdfDocument: PDFDocument, pageIndex: Int, secondPageIndex: Int?, trimWhitespace: Bool = false, documentKey: String = "doc") {
         self.pdfDocument = pdfDocument
         self.pageIndex = pageIndex
         self.secondPageIndex = secondPageIndex
         self.trimWhitespace = trimWhitespace
+        self.documentKey = documentKey
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -151,13 +157,13 @@ class PDFPageSpreadViewController: UIViewController, UIScrollViewDelegate, Pagin
         if let page = pdfDocument.page(at: pageIndex) {
             let pageSize = pageImageSize(for: page, within: availableSize, isTwoUp: secondPageIndex != nil)
             let renderSize = CGSize(width: pageSize.width * scale, height: pageSize.height * scale)
-            primaryImageView.image = trimIfNeeded(page.thumbnail(of: renderSize, for: .mediaBox), key: "pdf-\(pageIndex)")
+            primaryImageView.image = trimIfNeeded(page.thumbnail(of: renderSize, for: .mediaBox), key: "pdf-\(documentKey)-\(pageIndex)")
         }
 
         if let secondIndex = secondPageIndex, let page = pdfDocument.page(at: secondIndex) {
             let pageSize = pageImageSize(for: page, within: availableSize, isTwoUp: true)
             let renderSize = CGSize(width: pageSize.width * scale, height: pageSize.height * scale)
-            secondaryImageView?.image = trimIfNeeded(page.thumbnail(of: renderSize, for: .mediaBox), key: "pdf-\(secondIndex)")
+            secondaryImageView?.image = trimIfNeeded(page.thumbnail(of: renderSize, for: .mediaBox), key: "pdf-\(documentKey)-\(secondIndex)")
         }
     }
 

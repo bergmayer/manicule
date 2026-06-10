@@ -86,7 +86,13 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
     func updateUIView(_ sv: ComicStripUIScrollView, context: Context) {
         let c = context.coordinator
         c.onTap = onTap
-        c.trimWhitespace = trimWhitespace
+        if c.trimWhitespace != trimWhitespace {
+            c.trimWhitespace = trimWhitespace
+            // Loaded images were decoded with the old trim setting — drop them
+            // so the visible window reloads with the new one.
+            c.imageViews.forEach { $0.image = nil }
+            c.loadVisibleImages()
+        }
 
         // Use containerSize from parent GeometryReader — reliable even when
         // the scroll view's own bounds are still 0 on the first layout pass.
@@ -327,7 +333,13 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
     func updateNSView(_ sv: ComicStripScrollView, context: Context) {
         let c = context.coordinator
         c.onTap = onTap
-        c.trimWhitespace = trimWhitespace
+        if c.trimWhitespace != trimWhitespace {
+            c.trimWhitespace = trimWhitespace
+            // Loaded images were decoded with the old trim setting — drop them
+            // so the visible window reloads with the new one.
+            c.imageViews.forEach { $0.image = nil }
+            c.loadVisibleImages()
+        }
 
         // Use containerSize from parent GeometryReader — reliable even when
         // the scroll view's own bounds are still 0 on the first layout pass.
@@ -400,7 +412,6 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
                 iv.imageScaling = .scaleProportionallyUpOrDown
                 iv.imageAlignment = .alignCenter
                 iv.frame = CGRect(x: 0, y: y, width: width, height: h)
-                iv.image = loadComicImage(at: url, trim: trimWhitespace)
                 container.addSubview(iv)
                 imageViews.append(iv)
                 pageOffsets.append(y)
@@ -411,6 +422,26 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
             let totalH = max(0, y - spacing)
             container.frame = CGRect(x: 0, y: 0, width: width, height: totalH)
             sv.magnification = CGFloat(zoomScale.wrappedValue)
+            loadVisibleImages()
+        }
+
+        /// Decode only pages near the viewport and release the rest — a long
+        /// strip at full resolution would otherwise hold the whole archive
+        /// decoded in memory.
+        func loadVisibleImages() {
+            guard let sv = scrollView else { return }
+            let visible = sv.documentVisibleRect
+            let buffer: CGFloat = 600
+
+            for (i, iv) in imageViews.enumerated() {
+                if iv.frame.maxY >= visible.minY - buffer && iv.frame.minY <= visible.maxY + buffer {
+                    if iv.image == nil {
+                        iv.image = loadComicImage(at: pages[i], trim: trimWhitespace)
+                    }
+                } else {
+                    iv.image = nil
+                }
+            }
         }
 
         @objc func magnificationDidChange(_ note: Notification) {
@@ -423,6 +454,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
 
         @objc func scrollDidChange(_ note: Notification) {
             guard let sv = scrollView else { return }
+            loadVisibleImages()
             let y = sv.contentView.bounds.origin.y
             let page = calculateVisiblePage(y: y)
             if page != currentPage.wrappedValue {

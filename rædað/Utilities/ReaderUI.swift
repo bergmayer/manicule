@@ -50,7 +50,7 @@ final class FastScrollController {
         onCountChanged?(count)
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.count = 0
                 self.onCountChanged?(0)
@@ -76,27 +76,59 @@ struct ReaderCommandHandlers {
     var onZoomOut: () -> Void
 }
 
+/// Subscribes to one reader notification command, firing only when this
+/// view's window is key. Menu commands post app-wide notifications; without
+/// the key-window check, every open reader window on macOS would act on the
+/// same Cmd+D / Cmd+F / etc.
+private struct ReaderCommandModifier: ViewModifier {
+    let name: Notification.Name
+    let action: () -> Void
+    #if os(macOS)
+    @Environment(\.controlActiveState) private var controlActiveState
+    #endif
+
+    private var isKeyWindow: Bool {
+        #if os(macOS)
+        controlActiveState == .key
+        #else
+        true
+        #endif
+    }
+
+    func body(content: Content) -> some View {
+        content.onReceive(NotificationCenter.default.publisher(for: name)) { _ in
+            if isKeyWindow { action() }
+        }
+    }
+}
+
 private struct ReaderCommandsModifier: ViewModifier {
     let handlers: ReaderCommandHandlers
 
     func body(content: Content) -> some View {
         content
-            .onReceive(NotificationCenter.default.publisher(for: .toggleViewMode)) { _ in handlers.onToggleViewMode() }
-            .onReceive(NotificationCenter.default.publisher(for: .bookmarkPosition)) { _ in handlers.onBookmark() }
-            .onReceive(NotificationCenter.default.publisher(for: .showSavedPositions)) { _ in handlers.onShowSavedPositions() }
-            .onReceive(NotificationCenter.default.publisher(for: .showReadingSettings)) { _ in handlers.onShowReadingSettings() }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleSearch)) { _ in handlers.onToggleSearch() }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleImmersive)) { _ in handlers.onToggleImmersive() }
-            .onReceive(NotificationCenter.default.publisher(for: .zoomIn)) { _ in handlers.onZoomIn() }
-            .onReceive(NotificationCenter.default.publisher(for: .zoomOut)) { _ in handlers.onZoomOut() }
+            .onReaderCommand(.toggleViewMode, perform: handlers.onToggleViewMode)
+            .onReaderCommand(.bookmarkPosition, perform: handlers.onBookmark)
+            .onReaderCommand(.showSavedPositions, perform: handlers.onShowSavedPositions)
+            .onReaderCommand(.showReadingSettings, perform: handlers.onShowReadingSettings)
+            .onReaderCommand(.toggleSearch, perform: handlers.onToggleSearch)
+            .onReaderCommand(.toggleImmersive, perform: handlers.onToggleImmersive)
+            .onReaderCommand(.zoomIn, perform: handlers.onZoomIn)
+            .onReaderCommand(.zoomOut, perform: handlers.onZoomOut)
     }
 }
 
 extension View {
     /// Subscribes to the eight notification commands that every reader handles.
-    /// Reader-specific commands stay as inline `.onReceive` calls.
+    /// Reader-specific commands subscribe individually via `onReaderCommand`.
     func readerCommands(_ handlers: ReaderCommandHandlers) -> some View {
         modifier(ReaderCommandsModifier(handlers: handlers))
+    }
+
+    /// Subscribes to a single reader menu command, gated to the key window on
+    /// macOS so commands don't hit every open document window.
+    func onReaderCommand(_ name: Notification.Name, perform action: @escaping () -> Void) -> some View {
+        modifier(ReaderCommandModifier(name: name, action: action))
     }
 }
 

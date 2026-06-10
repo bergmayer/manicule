@@ -17,24 +17,40 @@ func imageDimensions(at url: URL) -> CGSize? {
     return CGSize(width: w, height: h)
 }
 
+/// Loads a downsampled image via ImageIO without decoding the full bitmap.
+/// Used for sidebar thumbnails where full-resolution pages waste memory.
+nonisolated func loadComicThumbnail(at url: URL, maxPixelSize: Int) -> CGImage? {
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        kCGImageSourceCreateThumbnailWithTransform: true
+    ]
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+}
+
 #if canImport(UIKit)
 /// Loads a comic page from disk, optionally trimming whitespace borders.
-/// `key` is used to cache the trim result; pass the file's lastPathComponent.
-func loadComicImage(at url: URL, trim: Bool) -> UIImage? {
+/// The trim result is cached by the file's full path — comics extract into
+/// per-archive UUID directories, so paths stay unique even when page
+/// filenames (e.g. "001.jpg") repeat across different books.
+nonisolated func loadComicImage(at url: URL, trim: Bool) -> UIImage? {
     guard let image = UIImage(contentsOfFile: url.path) else { return nil }
     guard trim, let cgImage = image.cgImage else { return image }
-    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.lastPathComponent)
+    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.path)
     return UIImage(cgImage: trimmed, scale: image.scale, orientation: image.imageOrientation)
 }
 #endif
 
 #if canImport(AppKit)
 /// Loads a comic page from disk, optionally trimming whitespace borders.
-/// `key` is used to cache the trim result; pass the file's lastPathComponent.
-func loadComicImage(at url: URL, trim: Bool) -> NSImage? {
+/// The trim result is cached by the file's full path — comics extract into
+/// per-archive UUID directories, so paths stay unique even when page
+/// filenames (e.g. "001.jpg") repeat across different books.
+nonisolated func loadComicImage(at url: URL, trim: Bool) -> NSImage? {
     guard let image = NSImage(contentsOf: url) else { return nil }
     guard trim, let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
-    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.lastPathComponent)
+    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.path)
     return NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
 }
 

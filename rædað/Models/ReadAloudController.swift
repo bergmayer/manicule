@@ -65,6 +65,10 @@ final class ReadAloudController: NSObject {
 
     // MARK: - Private
 
+    // All offsets below are UTF-16 code-unit offsets into `fullText`. This
+    // matches the NSRanges from AVSpeechSynthesizer's word callbacks and the
+    // JS bridge's string offsets (JavaScript strings are UTF-16), so positions
+    // stay correct for text containing emoji or other non-BMP characters.
     private var fullText: String = ""
     private var textOffset: Int = 0
     private var lastSpokenWordLocation: Int = 0
@@ -247,7 +251,7 @@ final class ReadAloudController: NSObject {
             MPMediaItemPropertyMediaType: MPMediaType.anyAudio.rawValue,
         ]
         if !fullText.isEmpty {
-            let progress = Double(lastSpokenWordLocation) / Double(fullText.count)
+            let progress = Double(lastSpokenWordLocation) / Double((fullText as NSString).length)
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = progress * 100
             info[MPMediaItemPropertyPlaybackDuration] = 100.0
         }
@@ -280,7 +284,7 @@ final class ReadAloudController: NSObject {
 
     /// Seek to offset (e.g. from bridge page navigation).
     func seekTo(offset: Int) {
-        guard isActive, offset < fullText.count else { return }
+        guard isActive, offset < (fullText as NSString).length else { return }
         lastSpokenWordLocation = offset
         if isPlaying {
             cancelSpeech()
@@ -293,7 +297,7 @@ final class ReadAloudController: NSObject {
     /// if isPlaying, but if TTS finished during the debounce window, isPlaying
     /// is false and seekTo only updates position — this method resumes in that case.
     func seekAndResume(offset: Int) {
-        guard isActive, offset < fullText.count else { return }
+        guard isActive, offset < (fullText as NSString).length else { return }
         let wasPlaying = isPlaying
         seekTo(offset: offset)
         if wasPlaying && !isPlaying {
@@ -331,9 +335,14 @@ final class ReadAloudController: NSObject {
     }
 
     private func speakFrom(offset: Int) {
-        let clamped = max(0, min(offset, fullText.count))
-        let startIdx = fullText.index(fullText.startIndex, offsetBy: clamped)
-        let substring = String(fullText[startIdx...])
+        let ns = fullText as NSString
+        var clamped = max(0, min(offset, ns.length))
+        // Avoid splitting a surrogate pair when the offset comes from a
+        // fraction-based estimate rather than a word boundary.
+        if clamped > 0 && clamped < ns.length {
+            clamped = ns.rangeOfComposedCharacterSequence(at: clamped).location
+        }
+        let substring = ns.substring(from: clamped)
         guard !substring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             sectionFinishedNaturally = true
             onSectionFinished?()
@@ -375,8 +384,8 @@ final class ReadAloudController: NSObject {
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.string = fullText
         tokenizer.enumerateTokens(in: fullText.startIndex..<fullText.endIndex) { range, _ in
-            let start = fullText.distance(from: fullText.startIndex, to: range.lowerBound)
-            let end = fullText.distance(from: fullText.startIndex, to: range.upperBound)
+            let start = range.lowerBound.utf16Offset(in: fullText)
+            let end = range.upperBound.utf16Offset(in: fullText)
             sentences.append((start: start, end: end))
             return true
         }

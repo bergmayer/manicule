@@ -170,19 +170,13 @@ struct EPubReaderView: View {
                 onZoomIn: { adjustFontSize(by: 1) },
                 onZoomOut: { adjustFontSize(by: -1) }
             ))
-            .onReceive(NotificationCenter.default.publisher(for: .toggleTableOfContents)) { _ in
+            .onReaderCommand(.toggleTableOfContents) {
                 withAnimation { showTOC.toggle() }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .nextChapter)) { _ in
-                goToNextChapter()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .previousChapter)) { _ in
-                goToPreviousChapter()
-            }
+            .onReaderCommand(.nextChapter, perform: goToNextChapter)
+            .onReaderCommand(.previousChapter, perform: goToPreviousChapter)
             #if os(iOS) || os(visionOS)
-            .onReceive(NotificationCenter.default.publisher(for: .toggleReadAloud)) { _ in
-                toggleReadAloud()
-            }
+            .onReaderCommand(.toggleReadAloud, perform: toggleReadAloud)
             #endif
             .onChange(of: search.query) { _, newQuery in
                 searchDebouncer.handle(newQuery, perform: performEPubSearch, clear: clearEPubSearch)
@@ -456,7 +450,9 @@ struct EPubReaderView: View {
             if let onClose {
                 if readAloud.isActive {
                     Button {
-                        readAloud.dismiss()
+                        // Full teardown — also exits the bridge's read-aloud
+                        // mode, not just the controller.
+                        dismissReadAloud()
                     } label: {
                         Label("Done", systemImage: "speaker.wave.2.fill")
                     }

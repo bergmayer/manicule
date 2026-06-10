@@ -79,6 +79,14 @@ final class CoverThumbnailCache: Sendable {
         Self.pushToiCloud(cgImage: cgImage, fileHash: fileHash, syncDim: syncDim)
     }
 
+    /// Delete the cached cover (local JPEG and the iCloud-synced copy).
+    /// Called when a book leaves the tracked list so cover data doesn't
+    /// accumulate in the Caches directory and the iCloud KV quota.
+    func removeCover(for fileHash: String) {
+        try? FileManager.default.removeItem(at: jpegPath(for: fileHash))
+        NSUbiquitousKeyValueStore.default.removeObject(forKey: Self.iCloudCoverPrefix + fileHash)
+    }
+
     private nonisolated func jpegPath(for fileHash: String) -> URL {
         cacheDir.appendingPathComponent("\(fileHash).jpg")
     }

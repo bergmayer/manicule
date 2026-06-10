@@ -30,11 +30,11 @@ enum ComicArchiveParser: Sendable {
 
     /// Parse a CBZ (ZIP) comic archive from in-memory data.
     nonisolated static func parse(data: Data) throws -> ComicArchive {
-        let pages = try ZipExtractor.extractImages(data: data)
+        let extractionDir = try ZipExtractor.extract(data: data)
+        let pages = ZipExtractor.imageFiles(under: extractionDir)
         guard !pages.isEmpty else {
             throw DocumentError.parsingFailed("No images found in comic archive")
         }
-        let extractionDir = pages[0].deletingLastPathComponent()
         return ComicArchive(
             extractionDirectory: extractionDir,
             pages: pages,
@@ -85,6 +85,10 @@ enum ComicArchiveParser: Sendable {
             let ext = (entry.fileName as NSString).pathExtension.lowercased()
             guard imageExtensions.contains(ext) else { continue }
 
+            // Reject entry paths that would escape the output directory
+            let destinationURL = outputDir.appendingPathComponent(entry.fileName).standardized
+            guard destinationURL.path.hasPrefix(outputDir.path + "/") else { continue }
+
             // Use callback-based extraction for reliability
             var entryData = Data()
             try archive.extract(entry) { chunk, _ in
@@ -92,22 +96,12 @@ enum ComicArchiveParser: Sendable {
             }
             guard !entryData.isEmpty else { continue }
 
-            let destinationURL = outputDir.appendingPathComponent(entry.fileName)
             let parentDir = destinationURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
             try entryData.write(to: destinationURL)
         }
 
-        // Collect and sort extracted images
-        let enumerator = FileManager.default.enumerator(at: outputDir, includingPropertiesForKeys: nil)
-        var images: [URL] = []
-        while let url = enumerator?.nextObject() as? URL {
-            if imageExtensions.contains(url.pathExtension.lowercased()) {
-                images.append(url)
-            }
-        }
-        images.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-
+        let images = ZipExtractor.imageFiles(under: outputDir)
         guard !images.isEmpty else {
             throw DocumentError.parsingFailed("No images found in CBR archive")
         }

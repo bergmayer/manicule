@@ -33,7 +33,7 @@ private nonisolated let docLog = Logger(subsystem: "com.palefire.raedad", catego
 /// automatically. On iOS, IOSDocumentBrowser calls url.startAccessingSecurityScopedResource()
 /// before reading data, then passes it to DocumentContent.parse().
 struct ReaderDocument: FileDocument {
-    static var readableContentTypes: [UTType] = {
+    static let readableContentTypes: [UTType] = {
         var types: [UTType] = [
             .pdf,
             .epub,

@@ -5,8 +5,8 @@ import os
 /// Supports up to 12 bookmarks per book, plus auto-saved reading positions.
 ///
 /// Auto-save system:
-/// - 60 books with bookmarks or custom settings track position and are never auto-evicted.
-/// - 6 most recent books automatically track their reading position (rolling stack).
+/// - Up to 60 books with bookmarks or custom settings track position and are never auto-evicted.
+/// - The 12 most recent books automatically track their reading position (rolling stack).
 @Observable @MainActor
 final class BookmarkStore {
     private static let logger = Logger(subsystem: "com.palefire.raedad", category: "BookmarkStore")
@@ -32,6 +32,11 @@ final class BookmarkStore {
     /// across app launches for third-party providers — the provider extension
     /// re-vends a fresh URL with a fresh security scope on each resolve.
     private var fileProviderRefs: [String: FileProviderRef] = [:]
+    /// File paths whose URL bookmark + cover thumbnail were already refreshed
+    /// this session, keyed by fileHash. savePosition runs on every relocate /
+    /// page turn; recreating bookmark data and re-checking covers each time is
+    /// wasted work since the URL can't change while the book stays open.
+    private var sessionRefreshedPaths: [String: String] = [:]
 
     private static let bookmarkMigrationKey = "raedad.urlBookmarksMigrated_v2"
 
@@ -123,8 +128,13 @@ final class BookmarkStore {
     }
 
     func clearAllAutoSaved() {
+        let hashes = autoSavedPositions.map(\.id)
         autoSavedPositions.removeAll()
         persistAutoSaved()
+        for hash in hashes {
+            CoverThumbnailCache.shared.removeCover(for: hash)
+        }
+        sessionRefreshedPaths.removeAll()
     }
 
     // MARK: - Auto-Save Positions
@@ -166,15 +176,19 @@ final class BookmarkStore {
         evictOldRecentBooks()
         persistAutoSaved()
 
-        // Store a security-scoped URL bookmark so the file can be reopened from Recents
-        saveURLBookmark(for: fileURL, fileHash: hash)
+        if sessionRefreshedPaths[hash] != fileURL.path {
+            sessionRefreshedPaths[hash] = fileURL.path
 
-        // Generate cover thumbnail if not yet cached (runs in background)
-        let url = fileURL
-        let fileData = data
-        let cache = CoverThumbnailCache.shared
-        Task.detached(priority: .utility) {
-            cache.generateFromFileSync(at: url, data: fileData, fileHash: hash)
+            // Store a security-scoped URL bookmark so the file can be reopened from Recents
+            saveURLBookmark(for: fileURL, fileHash: hash)
+
+            // Generate cover thumbnail if not yet cached (runs in background)
+            let url = fileURL
+            let fileData = data
+            let cache = CoverThumbnailCache.shared
+            Task.detached(priority: .utility) {
+                cache.generateFromFileSync(at: url, data: fileData, fileHash: hash)
+            }
         }
 
         return nil
@@ -185,10 +199,13 @@ final class BookmarkStore {
         autoSavedPositions.first { $0.id == fileHash }
     }
 
-    /// Remove an auto-saved position.
+    /// Remove an auto-saved position. Also drops the book's device-local
+    /// state (URL bookmark, FileProvider ref, cover thumbnail) — all of it is
+    /// only reachable through the Recents list this entry backed.
     func removeSavedPosition(for fileHash: String) {
         autoSavedPositions.removeAll { $0.id == fileHash }
         persistAutoSaved()
+        removeDeviceLocalState(for: fileHash)
     }
 
     /// Refresh pinned status for a book (call after adding/removing bookmarks or settings).
@@ -219,11 +236,27 @@ final class BookmarkStore {
             .sorted { $0.element.lastOpened > $1.element.lastOpened }
 
         if recent.count > Self.maxRecentBooks {
-            let toRemove = recent.suffix(from: Self.maxRecentBooks).map(\.offset)
-            for idx in toRemove.sorted().reversed() {
+            let evicted = recent.suffix(from: Self.maxRecentBooks)
+            for idx in evicted.map(\.offset).sorted().reversed() {
                 autoSavedPositions.remove(at: idx)
             }
+            // Without this, URL bookmarks and covers for long-gone books pile
+            // up in UserDefaults and the 1 MB iCloud KV quota as recents churn.
+            for entry in evicted {
+                removeDeviceLocalState(for: entry.element.id)
+            }
         }
+    }
+
+    /// Drop everything stored on this device (and the iCloud cover) for a book
+    /// that is no longer tracked.
+    private func removeDeviceLocalState(for fileHash: String) {
+        if urlBookmarks.removeValue(forKey: fileHash) != nil {
+            persistURLBookmarks()
+        }
+        removeFileProviderRef(for: fileHash)
+        sessionRefreshedPaths.removeValue(forKey: fileHash)
+        CoverThumbnailCache.shared.removeCover(for: fileHash)
     }
 
     private func persistAutoSaved() {

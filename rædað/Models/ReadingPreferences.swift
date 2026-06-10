@@ -86,6 +86,7 @@ final class ReadingPreferences {
         if let lastUsed = perBookOverrides[hash]?.lastUsed,
            Date().timeIntervalSince(lastUsed) <= 60 { return }
         perBookOverrides[hash]?.lastUsed = Date()
+        save()
     }
 
     /// Whether a per-book override exists for the given hash.

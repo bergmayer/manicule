@@ -4,7 +4,11 @@ import Vision
 /// Detects and caches content bounds for page trimming (whitespace removal).
 /// Uses Vision framework text recognition as the primary signal, supplemented by
 /// saliency for non-text content. Falls back to pixel-based edge analysis.
-final class ContentTrimmer: @unchecked Sendable {
+///
+/// `nonisolated` opts out of the project's MainActor-by-default isolation:
+/// detection runs from background tasks and must not hop to the main actor.
+/// Thread safety is provided by the internal lock.
+nonisolated final class ContentTrimmer: @unchecked Sendable {
     static let shared = ContentTrimmer()
 
     private var cache: [String: CGRect] = [:]

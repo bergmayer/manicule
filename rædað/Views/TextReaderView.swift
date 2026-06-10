@@ -239,13 +239,11 @@ struct TextReaderView: View {
                 onZoomIn: { adjustFontSize(by: 1) },
                 onZoomOut: { adjustFontSize(by: -1) }
             ))
-            .onReceive(NotificationCenter.default.publisher(for: .toggleTableOfContents)) { _ in
+            .onReaderCommand(.toggleTableOfContents) {
                 showTOC.toggle()
             }
             #if os(iOS) || os(visionOS)
-            .onReceive(NotificationCenter.default.publisher(for: .toggleReadAloud)) { _ in
-                toggleReadAloud()
-            }
+            .onReaderCommand(.toggleReadAloud, perform: toggleReadAloud)
             #endif
             .onChange(of: search.query) { _, newQuery in
                 searchDebouncer.handle(newQuery, perform: performTextSearch, clear: clearTextSearch)
@@ -642,136 +640,72 @@ struct TextReaderView: View {
 
     @ToolbarContentBuilder
     private var textToolbar: some ToolbarContent {
-        if sizeClass == .compact {
-            // iPhone: single menu with all actions
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Section {
-                        ViewModeMenuButtons(
-                            onAutomatic: selectAutomatic,
-                            onSinglePage: selectSinglePage,
-                            onTwoPage: selectTwoPage,
-                            onScrolling: selectScrolling
-                        )
-                    }
-                    Section {
-                        if isMarkdown {
-                            Button { renderMarkdown.toggle() } label: {
-                                Label(renderMarkdown ? "Raw Text" : "Render Markdown",
-                                      systemImage: renderMarkdown ? "doc.plaintext" : "doc.richtext")
-                            }
-                        }
-                        if !isMarkdown {
-                            Button { toggleReflow() } label: {
-                                Label(effective.reflowText ? "Preserve Line Breaks" : "Reflow Text",
-                                      systemImage: effective.reflowText ? "text.justify.leading" : "text.word.spacing")
-                            }
-                        }
-                        Button { showTOC.toggle() } label: {
-                            Label("Sidebar", systemImage: showTOC ? "sidebar.leading" : "sidebar.left")
-                        }
-                        Button { toggleBookmark() } label: {
-                            Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
-                                  systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                        }
-                        Button { search.isShowing.toggle(); if !search.isShowing { dismissTextSearch() } } label: {
-                            Label("Search", systemImage: "magnifyingglass")
-                        }
-                    }
-                    #if os(iOS) || os(visionOS)
-                    Section {
-                        Button { toggleReadAloud() } label: {
-                            Label(readAloud.isActive ? "Stop Read Aloud" : "Read Aloud",
-                                  systemImage: readAloud.isActive ? "speaker.slash" : "speaker.wave.2")
-                        }
-                    }
-                    #endif
-                    Section {
-                        Button { showSettings = true } label: { Label("Reading Settings", systemImage: "textformat.size") }
-                        Button { showBookmarks = true } label: { Label("Go to Bookmark...", systemImage: "bookmark") }
-                    }
-                } label: {
-                    Label("Menu", systemImage: "ellipsis.circle")
+        if isPaginated {
+            ToolbarItemGroup(placement: .automatic) {
+                Button { webViewProxy.previousPage?() } label: {
+                    Label("Previous Page", systemImage: "chevron.left")
                 }
-            }
-        } else {
-            // Mac / iPad: full toolbar
-            if isPaginated {
-                ToolbarItemGroup(placement: .automatic) {
-                    Button { webViewProxy.previousPage?() } label: {
-                        Label("Previous Page", systemImage: "chevron.left")
-                    }
-                    .disabled(currentPage <= 0)
+                .disabled(currentPage <= 0)
 
-                    Button { webViewProxy.nextPage?() } label: {
-                        Label("Next Page", systemImage: "chevron.right")
-                    }
-                    .disabled(currentPage >= totalPages - 1)
+                Button { webViewProxy.nextPage?() } label: {
+                    Label("Next Page", systemImage: "chevron.right")
                 }
+                .disabled(currentPage >= totalPages - 1)
             }
+        }
 
+        ToolbarItem(placement: .automatic) {
+            Menu {
+                ViewModeMenuButtons(
+                    onAutomatic: selectAutomatic,
+                    onSinglePage: selectSinglePage,
+                    onTwoPage: selectTwoPage,
+                    onScrolling: selectScrolling
+                )
+            } label: {
+                Label("View Mode", systemImage: currentModeIcon)
+            }
+        }
+
+        if isMarkdown {
             ToolbarItem(placement: .automatic) {
-                Menu {
-                    ViewModeMenuButtons(
-                        onAutomatic: selectAutomatic,
-                        onSinglePage: selectSinglePage,
-                        onTwoPage: selectTwoPage,
-                        onScrolling: selectScrolling
-                    )
-                } label: {
-                    Label("View Mode", systemImage: currentModeIcon)
+                Button { renderMarkdown.toggle() } label: {
+                    Label(renderMarkdown ? "Raw Text" : "Render Markdown",
+                          systemImage: renderMarkdown ? "doc.plaintext" : "doc.richtext")
                 }
             }
+        }
 
-            if isMarkdown {
-                ToolbarItem(placement: .automatic) {
-                    Button { renderMarkdown.toggle() } label: {
-                        Label(renderMarkdown ? "Raw Text" : "Render Markdown",
-                              systemImage: renderMarkdown ? "doc.plaintext" : "doc.richtext")
-                    }
-                }
-            }
-
-            if !isMarkdown {
-                ToolbarItem(placement: .automatic) {
-                    Button { toggleReflow() } label: {
-                        Label(effective.reflowText ? "Preserve Line Breaks" : "Reflow Text",
-                              systemImage: effective.reflowText ? "text.justify.leading" : "text.word.spacing")
-                    }
-                }
-            }
-
+        if !isMarkdown {
             ToolbarItem(placement: .automatic) {
-                Button { showTOC.toggle() } label: {
-                    Label("Sidebar", systemImage: showTOC ? "sidebar.leading" : "sidebar.left")
+                Button { toggleReflow() } label: {
+                    Label(effective.reflowText ? "Preserve Line Breaks" : "Reflow Text",
+                          systemImage: effective.reflowText ? "text.justify.leading" : "text.word.spacing")
                 }
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { toggleBookmark() } label: {
-                    Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark", systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { showTOC.toggle() } label: {
+                Label("Sidebar", systemImage: showTOC ? "sidebar.leading" : "sidebar.left")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { search.isShowing.toggle(); if !search.isShowing { dismissTextSearch() } } label: {
-                    Label("Search", systemImage: "magnifyingglass")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { toggleBookmark() } label: {
+                Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark", systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
             }
+        }
 
-            #if os(iOS) || os(visionOS)
-            ToolbarItem(placement: .automatic) {
-                Button { toggleReadAloud() } label: {
-                    Label(readAloud.isActive ? "Stop Read Aloud" : "Read Aloud",
-                          systemImage: readAloud.isActive ? "speaker.slash" : "speaker.wave.2")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { search.isShowing.toggle(); if !search.isShowing { dismissTextSearch() } } label: {
+                Label("Search", systemImage: "magnifyingglass")
             }
-            #endif
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { showSettings = true } label: {
-                    Label("Reading Settings", systemImage: "textformat.size")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { showSettings = true } label: {
+                Label("Reading Settings", systemImage: "textformat.size")
             }
         }
     }
@@ -922,7 +856,8 @@ struct TextReaderView: View {
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let startOffset = Int(scrollFraction * Double(text.count))
+        // UTF-16 offset — ReadAloudController tracks positions in UTF-16 units.
+        let startOffset = Int(scrollFraction * Double((text as NSString).length))
 
         readAloud.loadText(text, startOffset: startOffset)
         readAloud.onWordRange = { _ in }
@@ -987,13 +922,19 @@ struct TextReaderView: View {
         </head><body>\(bodyContent)</body></html>
         """
 
+        // A fresh directory per render is load-bearing: the changed file URL is
+        // what makes the WebView reload when reflow/markdown settings change.
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("raedad-text-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("content.html")
         try? html.write(to: file, atomically: true, encoding: .utf8)
+        let previousDir = htmlBaseURL
         htmlFileURL = file
         htmlBaseURL = dir
+        if let previousDir {
+            try? FileManager.default.removeItem(at: previousDir)
+        }
     }
 
     // MARK: - Markdown to HTML
@@ -1108,8 +1049,8 @@ struct TextReaderView: View {
             while i < lines.count {
                 let t = lines[i].trimmingCharacters(in: .whitespaces)
                 if t.isEmpty { i += 1; break }
-                if t.hasPrefix("```") || t.hasPrefix("# ") || t.hasPrefix("## ")
-                    || t.hasPrefix("### ") || t.hasPrefix("> ") || t == ">"
+                if t.hasPrefix("```") || parseHeader(t) != nil
+                    || t.hasPrefix("> ") || t == ">"
                     || isUnorderedListItem(t) || parseOrderedListItem(t) != nil
                     || isHorizontalRule(t) { break }
                 paraLines.append(processInline(t))

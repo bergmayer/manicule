@@ -47,7 +47,6 @@ struct ComicReaderView: View {
     @State private var ocrPagesScanned = 0
 
     @FocusState private var isFocused: Bool
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     private let bookmarkStore = BookmarkStore.shared
     private let readingPrefs = ReadingPreferences.shared
@@ -107,7 +106,7 @@ struct ComicReaderView: View {
                 onZoomIn: { zoomScale = min(5.0, zoomScale * 1.25) },
                 onZoomOut: { zoomScale = max(0.25, zoomScale / 1.25) }
             ))
-            .onReceive(NotificationCenter.default.publisher(for: .toggleReadingDirection)) { _ in
+            .onReaderCommand(.toggleReadingDirection) {
                 readingDirection = readingDirection == .leftToRight ? .rightToLeft : .leftToRight
             }
             .onChange(of: search.query) { _, newQuery in
@@ -665,100 +664,60 @@ struct ComicReaderView: View {
 
     @ToolbarContentBuilder
     private var comicToolbar: some ToolbarContent {
-        if sizeClass == .compact {
-            // iPhone: single menu with all actions
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Section {
-                        ViewModeMenuButtons(
-                            onAutomatic: selectAutomatic,
-                            onSinglePage: selectSinglePage,
-                            onTwoPage: selectTwoPage,
-                            onScrolling: selectScrolling,
-                            scrollingLabel: "Continuous Scroll"
-                        )
-                    }
-                    Section {
-                        Button { toggleTrim() } label: {
-                            Label(trimWhitespace ? "Show Full Page" : "Trim Whitespace",
-                                  systemImage: trimWhitespace ? "arrow.up.left.and.arrow.down.right" : "crop")
-                        }
-                        Button { showThumbnails.toggle() } label: {
-                            Label("Thumbnails", systemImage: "sidebar.leading")
-                        }
-                        Button { toggleBookmark() } label: {
-                            Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
-                                  systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                        }
-                        Button { search.isShowing.toggle(); if !search.isShowing { dismissComicSearch() } } label: {
-                            Label("Search", systemImage: "magnifyingglass")
-                        }
-                    }
-                    Section {
-                        Button { showSettings = true } label: { Label("Reading Settings", systemImage: "textformat.size") }
-                        Button { showBookmarks = true } label: { Label("Go to Bookmark...", systemImage: "bookmark") }
-                    }
-                } label: {
-                    Label("Menu", systemImage: "ellipsis.circle")
-                }
+        ToolbarItemGroup(placement: .automatic) {
+            Button(action: { previousPage() }) {
+                Label("Previous Page", systemImage: "chevron.left")
             }
-        } else {
-            // Mac / iPad: full toolbar
-            ToolbarItemGroup(placement: .automatic) {
-                Button(action: { previousPage() }) {
-                    Label("Previous Page", systemImage: "chevron.left")
-                }
-                .disabled(currentPage <= 0)
+            .disabled(currentPage <= 0)
 
-                Button(action: { nextPage() }) {
-                    Label("Next Page", systemImage: "chevron.right")
-                }
-                .disabled(currentPage + pageStep >= archive.pageCount)
+            Button(action: { nextPage() }) {
+                Label("Next Page", systemImage: "chevron.right")
             }
+            .disabled(currentPage + pageStep >= archive.pageCount)
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Menu {
-                    ViewModeMenuButtons(
-                        onAutomatic: selectAutomatic,
-                        onSinglePage: selectSinglePage,
-                        onTwoPage: selectTwoPage,
-                        onScrolling: selectScrolling,
-                        scrollingLabel: "Continuous Scroll"
-                    )
-                } label: {
-                    Label("View Mode", systemImage: currentModeIcon)
-                }
+        ToolbarItem(placement: .automatic) {
+            Menu {
+                ViewModeMenuButtons(
+                    onAutomatic: selectAutomatic,
+                    onSinglePage: selectSinglePage,
+                    onTwoPage: selectTwoPage,
+                    onScrolling: selectScrolling,
+                    scrollingLabel: "Continuous Scroll"
+                )
+            } label: {
+                Label("View Mode", systemImage: currentModeIcon)
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { toggleTrim() } label: {
-                    Label(trimWhitespace ? "Show Full Page" : "Trim Whitespace",
-                          systemImage: trimWhitespace ? "arrow.up.left.and.arrow.down.right" : "crop")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { toggleTrim() } label: {
+                Label(trimWhitespace ? "Show Full Page" : "Trim Whitespace",
+                      systemImage: trimWhitespace ? "arrow.up.left.and.arrow.down.right" : "crop")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { showThumbnails.toggle() } label: {
-                    Label("Thumbnails", systemImage: "sidebar.leading")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { showThumbnails.toggle() } label: {
+                Label("Thumbnails", systemImage: "sidebar.leading")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { toggleBookmark() } label: {
-                    Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark", systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { toggleBookmark() } label: {
+                Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark", systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { search.isShowing.toggle(); if !search.isShowing { dismissComicSearch() } } label: {
-                    Label("Search", systemImage: "magnifyingglass")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { search.isShowing.toggle(); if !search.isShowing { dismissComicSearch() } } label: {
+                Label("Search", systemImage: "magnifyingglass")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { showSettings = true } label: {
-                    Label("Reading Settings", systemImage: "textformat.size")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { showSettings = true } label: {
+                Label("Reading Settings", systemImage: "textformat.size")
             }
         }
     }
@@ -920,12 +879,18 @@ private struct ComicPageThumbnail: View {
     #if os(macOS)
     private func loadThumbnail() async -> NSImage? {
         let url = imageURL
-        return await Task.detached { NSImage(contentsOf: url) }.value
+        return await Task.detached {
+            guard let cg = loadComicThumbnail(at: url, maxPixelSize: 360) else { return nil }
+            return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }.value
     }
     #else
     private func loadThumbnail() async -> UIImage? {
         let url = imageURL
-        return await Task.detached { UIImage(contentsOfFile: url.path) }.value
+        return await Task.detached {
+            guard let cg = loadComicThumbnail(at: url, maxPixelSize: 360) else { return nil }
+            return UIImage(cgImage: cg)
+        }.value
     }
     #endif
 }

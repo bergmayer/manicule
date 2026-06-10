@@ -5,6 +5,7 @@ import ZIPFoundation
 enum ZipExtractor: Sendable {
     /// Extracts a ZIP archive from in-memory data to a unique temp directory.
     /// Returns the URL of the extraction root directory.
+    /// Entries whose paths would escape the extraction root (zip-slip) are skipped.
     nonisolated static func extract(data: Data) throws -> URL {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("raedad-epub-\(UUID().uuidString)")
@@ -13,7 +14,8 @@ enum ZipExtractor: Sendable {
         let archive = try Archive(data: data, accessMode: .read)
 
         for entry in archive {
-            let destinationURL = tempDir.appendingPathComponent(entry.path)
+            let destinationURL = tempDir.appendingPathComponent(entry.path).standardized
+            guard destinationURL.path.hasPrefix(tempDir.path + "/") else { continue }
             if entry.type == .directory {
                 try FileManager.default.createDirectory(
                     at: destinationURL,
@@ -29,13 +31,10 @@ enum ZipExtractor: Sendable {
         return tempDir
     }
 
-    /// Extracts images from a ZIP archive (for CBZ comics).
-    /// Returns sorted image file URLs.
-    nonisolated static func extractImages(data: Data) throws -> [URL] {
-        let dir = try extract(data: data)
+    /// Collects image files under a directory, sorted by filename (natural order).
+    nonisolated static func imageFiles(under directory: URL) -> [URL] {
         let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff"]
-
-        let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)
+        let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil)
         var images: [URL] = []
         while let url = enumerator?.nextObject() as? URL {
             if imageExtensions.contains(url.pathExtension.lowercased()) {
@@ -43,5 +42,11 @@ enum ZipExtractor: Sendable {
             }
         }
         return images.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    /// Extracts images from a ZIP archive (for CBZ comics).
+    /// Returns sorted image file URLs.
+    nonisolated static func extractImages(data: Data) throws -> [URL] {
+        imageFiles(under: try extract(data: data))
     }
 }

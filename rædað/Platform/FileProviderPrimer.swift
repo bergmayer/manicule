@@ -3,7 +3,7 @@ import Foundation
 import FileProvider
 import os.log
 
-private let primerLog = Logger(subsystem: "com.palefire.raedad", category: "FileProviderPrimer")
+private nonisolated let primerLog = Logger(subsystem: "com.palefire.raedad", category: "FileProviderPrimer")
 
 /// FileProvider helpers for capturing stable identifiers on open and
 /// re-vending URLs on later reopens.

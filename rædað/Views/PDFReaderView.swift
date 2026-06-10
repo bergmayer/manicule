@@ -52,7 +52,6 @@ struct PDFReaderView: View {
     @State private var ocrSearchTask: Task<Void, Never>?
 
     @FocusState private var isFocused: Bool
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     private let bookmarkStore = BookmarkStore.shared
     private let readingPrefs = ReadingPreferences.shared
@@ -112,7 +111,7 @@ struct PDFReaderView: View {
                 onZoomIn: { zoomScale = min(4.0, (zoomScale ?? 1.0) * 1.25) },
                 onZoomOut: { zoomScale = max(0.25, (zoomScale ?? 1.0) / 1.25) }
             ))
-            .onReceive(NotificationCenter.default.publisher(for: .showGoToPage)) { _ in
+            .onReaderCommand(.showGoToPage) {
                 showGoToPage = true
             }
             .onChange(of: search.query) { _, newQuery in
@@ -280,6 +279,7 @@ struct PDFReaderView: View {
                 currentPage: $currentPageIndex,
                 twoUp: effectiveTwoUp,
                 trimWhitespace: trimWhitespace,
+                documentKey: fileHash ?? "doc",
                 onToggleChrome: { showChrome.toggle() }
             )
         } else {
@@ -432,101 +432,60 @@ struct PDFReaderView: View {
 
     @ToolbarContentBuilder
     private var pdfToolbar: some ToolbarContent {
-        if sizeClass == .compact {
-            // iPhone: single menu with all actions
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Section {
-                        ViewModeMenuButtons(
-                            onAutomatic: selectAutomatic,
-                            onSinglePage: selectSinglePage,
-                            onTwoPage: selectTwoPage,
-                            onScrolling: selectScrolling,
-                            scrollingLabel: "Continuous Scroll"
-                        )
-                    }
-                    Section {
-                        Button { toggleTrim() } label: {
-                            Label(trimWhitespace ? "Show Full Page" : "Trim Whitespace",
-                                  systemImage: trimWhitespace ? "arrow.right.and.line.vertical.and.arrow.left" : "crop")
-                        }
-                        Button { showThumbnails.toggle() } label: {
-                            Label("Thumbnails", systemImage: "sidebar.leading")
-                        }
-                        Button { toggleBookmark() } label: {
-                            Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
-                                  systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                        }
-                        Button { search.isShowing.toggle(); if !search.isShowing { dismissPdfSearch() } } label: {
-                            Label("Search", systemImage: "magnifyingglass")
-                        }
-                    }
-                    Section {
-                        Button { showGoToPage = true } label: { Label("Go to Page", systemImage: "number") }
-                        Button { showSettings = true } label: { Label("Reading Settings", systemImage: "textformat.size") }
-                        Button { showBookmarks = true } label: { Label("Go to Bookmark...", systemImage: "bookmark") }
-                    }
-                } label: {
-                    Label("Menu", systemImage: "ellipsis.circle")
-                }
+        ToolbarItemGroup(placement: .automatic) {
+            Button(action: previousPage) {
+                Label("Previous Page", systemImage: "chevron.left")
             }
-        } else {
-            // Mac / iPad: full toolbar
-            ToolbarItemGroup(placement: .automatic) {
-                Button(action: previousPage) {
-                    Label("Previous Page", systemImage: "chevron.left")
-                }
-                .disabled(currentPageIndex <= 0)
+            .disabled(currentPageIndex <= 0)
 
-                Button(action: nextPage) {
-                    Label("Next Page", systemImage: "chevron.right")
-                }
-                .disabled(currentPageIndex >= pageCount - 1)
+            Button(action: nextPage) {
+                Label("Next Page", systemImage: "chevron.right")
             }
+            .disabled(currentPageIndex >= pageCount - 1)
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Menu {
-                    ViewModeMenuButtons(
-                        onAutomatic: selectAutomatic,
-                        onSinglePage: selectSinglePage,
-                        onTwoPage: selectTwoPage,
-                        onScrolling: selectScrolling,
-                        scrollingLabel: "Continuous Scroll"
-                    )
-                } label: {
-                    Label("View Mode", systemImage: currentModeIcon)
-                }
+        ToolbarItem(placement: .automatic) {
+            Menu {
+                ViewModeMenuButtons(
+                    onAutomatic: selectAutomatic,
+                    onSinglePage: selectSinglePage,
+                    onTwoPage: selectTwoPage,
+                    onScrolling: selectScrolling,
+                    scrollingLabel: "Continuous Scroll"
+                )
+            } label: {
+                Label("View Mode", systemImage: currentModeIcon)
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { toggleTrim() } label: {
-                    Label(trimWhitespace ? "Show Full Page" : "Trim Whitespace",
-                          systemImage: trimWhitespace ? "arrow.right.and.line.vertical.and.arrow.left" : "crop")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { toggleTrim() } label: {
+                Label(trimWhitespace ? "Show Full Page" : "Trim Whitespace",
+                      systemImage: trimWhitespace ? "arrow.right.and.line.vertical.and.arrow.left" : "crop")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { showThumbnails.toggle() } label: {
-                    Label("Thumbnails", systemImage: "sidebar.leading")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { showThumbnails.toggle() } label: {
+                Label("Thumbnails", systemImage: "sidebar.leading")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { toggleBookmark() } label: {
-                    Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark", systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { toggleBookmark() } label: {
+                Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark", systemImage: isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { search.isShowing.toggle(); if !search.isShowing { dismissPdfSearch() } } label: {
-                    Label("Search", systemImage: "magnifyingglass")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { search.isShowing.toggle(); if !search.isShowing { dismissPdfSearch() } } label: {
+                Label("Search", systemImage: "magnifyingglass")
             }
+        }
 
-            ToolbarItem(placement: .automatic) {
-                Button { showSettings = true } label: {
-                    Label("Reading Settings", systemImage: "textformat.size")
-                }
+        ToolbarItem(placement: .automatic) {
+            Button { showSettings = true } label: {
+                Label("Reading Settings", systemImage: "textformat.size")
             }
         }
     }
@@ -639,9 +598,10 @@ struct PDFReaderView: View {
                 let size = CGSize(width: min(bounds.width * 2, 2000), height: min(bounds.height * 2, 2000))
                 let thumbnail = page.thumbnail(of: size, for: .mediaBox)
 
-                // Save thumbnail to temp file for OCR
+                // Save thumbnail to temp file for OCR. The file hash keeps the
+                // path (and OCRService's URL-keyed cache) distinct per document.
                 let tmpURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("raedad-pdf-ocr-\(i).png")
+                    .appendingPathComponent("raedad-pdf-ocr-\(fileHash ?? "doc")-\(i).png")
                 #if canImport(UIKit)
                 if let data = thumbnail.pngData() {
                     try? data.write(to: tmpURL)
@@ -800,19 +760,23 @@ struct PDFReaderView: View {
             }
         }
 
-        // Build page order: center first, then expanding outward
+        // Build page order: center first, then expanding outward.
+        // Pages are marked in `trimmedPages` only after their crop box is
+        // applied — a pass cancelled mid-way must not leave pages permanently
+        // skipped. Re-running over an in-flight page is cheap: ContentTrimmer
+        // caches the detected rect by key.
         var pageOrder: [Int] = []
-        let alreadyTrimmed = trimmedPages
+        var scheduled = Set<Int>()
         for dist in 0..<count {
             for candidate in [center + dist, center - dist] {
-                if candidate >= 0, candidate < count, !alreadyTrimmed.contains(candidate),
-                   !pageOrder.contains(candidate) {
+                if candidate >= 0, candidate < count, !trimmedPages.contains(candidate),
+                   !scheduled.contains(candidate) {
                     pageOrder.append(candidate)
+                    scheduled.insert(candidate)
                 }
             }
         }
         guard !pageOrder.isEmpty else { return }
-        trimmedPages.formUnion(pageOrder)
 
         let url = fileURL
         let pdfData = data
@@ -838,6 +802,7 @@ struct PDFReaderView: View {
                 for (i, box) in cropBoxes {
                     doc.page(at: i)?.setBounds(box, for: .cropBox)
                 }
+                trimmedPages.formUnion(pageOrder)
             } else {
                 // Paginated mode: apply incrementally for fast first-page display
                 for i in pageOrder {
@@ -845,6 +810,7 @@ struct PDFReaderView: View {
                     if let cropBox = await computeCropBox(bgDoc: bgDoc, pageIndex: i) {
                         doc.page(at: i)?.setBounds(cropBox, for: .cropBox)
                     }
+                    trimmedPages.insert(i)
                 }
             }
         }
@@ -852,7 +818,8 @@ struct PDFReaderView: View {
 
     /// Computes the trimmed crop box for a single page on a background thread.
     private func computeCropBox(bgDoc: PDFDocument, pageIndex i: Int) async -> CGRect? {
-        await Task.detached {
+        let trimKey = "pdf-crop-\(fileHash ?? "doc")-\(i)"
+        return await Task.detached {
             guard let page = bgDoc.page(at: i) else { return nil }
             let mediaBox = page.bounds(for: .mediaBox)
             let thumbScale: CGFloat = min(1000 / mediaBox.width, 1000 / mediaBox.height, 2.0)
@@ -865,7 +832,7 @@ struct PDFReaderView: View {
             guard let cgImage = thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
             #endif
 
-            let contentRect = await ContentTrimmer.shared.contentRect(for: cgImage, key: "pdf-crop-\(i)")
+            let contentRect = ContentTrimmer.shared.contentRect(for: cgImage, key: trimKey)
             guard contentRect != CGRect(x: 0, y: 0, width: 1, height: 1) else { return nil }
 
             return CGRect(

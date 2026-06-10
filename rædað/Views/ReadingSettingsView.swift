@@ -18,13 +18,28 @@ struct ReaderSettingsSheet: View {
             }
             .tabItem { Label("Books", systemImage: "books.vertical") }
         }
-        .presentationDetents([.medium, .large])
+        // iPhone keeps the draggable medium/large detents. iPad skips them so
+        // the sheet adopts the standard centered form-sheet size — the medium
+        // detent leaves it looking lost with most of the form scrolled off.
+        .modifier(PhoneOnlyDetents())
         #else
         ReadingSettingsView(fileHash: fileHash, showReflowOption: showReflowOption)
             .frame(minWidth: 400, idealWidth: 500, minHeight: 600)
         #endif
     }
 }
+
+#if os(iOS)
+private struct PhoneOnlyDetents: ViewModifier {
+    func body(content: Content) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            content.presentationDetents([.medium, .large])
+        } else {
+            content
+        }
+    }
+}
+#endif
 
 /// Settings panel for reading preferences (font, size, spacing, margins, theme).
 /// Can operate in global mode or per-book mode.
@@ -165,7 +180,9 @@ struct ReadingSettingsView: View {
                     prefs.removeOverride(for: hash)
                 }
             }
-            #if os(macOS)
+            // Apply changes live on every platform. The reader behind the
+            // sheet previews them immediately, and an iOS swipe-dismiss
+            // (which never reaches the Done button) doesn't discard them.
             .onChange(of: fontFamily) { _, _ in applyLive() }
             .onChange(of: fontSize) { _, _ in applyLive() }
             .onChange(of: lineSpacing) { _, _ in applyLive() }
@@ -174,7 +191,6 @@ struct ReadingSettingsView: View {
             .onChange(of: theme) { _, _ in applyLive() }
             .onChange(of: reflowText) { _, _ in applyLive() }
             .onChange(of: textAlign) { _, _ in applyLive() }
-            #endif
         }
         #if os(macOS)
         .frame(minHeight: 600)
@@ -237,19 +253,19 @@ struct ReadingSettingsView: View {
 
     private func applyLive() {
         if let hash = fileHash, usePerBookOverride {
-            let existingTrim = prefs.perBookOverrides[hash]?.trimWhitespace
-            prefs.setOverride(for: hash, override: BookOverride(
-                fontFamily: fontFamily,
-                fontSize: fontSize,
-                lineSpacing: lineSpacing,
-                marginsOneUp: marginsOneUp,
-                marginsTwoUp: marginsTwoUp,
-                theme: theme,
-                viewMode: viewMode,
-                reflowText: reflowText,
-                trimWhitespace: existingTrim,
-                textAlign: textAlign
-            ))
+            // Mutate the existing override so fields this sheet doesn't edit
+            // (twoUp, trimWhitespace) survive a settings change.
+            var override = prefs.perBookOverrides[hash] ?? BookOverride()
+            override.fontFamily = fontFamily
+            override.fontSize = fontSize
+            override.lineSpacing = lineSpacing
+            override.marginsOneUp = marginsOneUp
+            override.marginsTwoUp = marginsTwoUp
+            override.theme = theme
+            override.viewMode = viewMode
+            override.reflowText = reflowText
+            override.textAlign = textAlign
+            prefs.setOverride(for: hash, override: override)
         } else {
             prefs.fontFamily = fontFamily
             prefs.fontSize = fontSize

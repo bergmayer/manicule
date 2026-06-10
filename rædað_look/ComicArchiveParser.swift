@@ -52,29 +52,22 @@ enum ComicArchiveParser: Sendable {
             let ext = (entry.fileName as NSString).pathExtension.lowercased()
             guard imageExtensions.contains(ext) else { continue }
 
+            // Reject entry paths that would escape the output directory
+            let destinationURL = outputDir.appendingPathComponent(entry.fileName).standardized
+            guard destinationURL.path.hasPrefix(outputDir.path + "/") else { continue }
+
             var entryData = Data()
             try archive.extract(entry) { chunk, _ in
                 entryData.append(chunk)
             }
             guard !entryData.isEmpty else { continue }
 
-            let destinationURL = outputDir.appendingPathComponent(entry.fileName)
             let parentDir = destinationURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
             try entryData.write(to: destinationURL)
         }
 
-        let enumerator = FileManager.default.enumerator(at: outputDir, includingPropertiesForKeys: nil)
-        var images: [URL] = []
-        while let url = enumerator?.nextObject() as? URL {
-            if imageExtensions.contains(url.pathExtension.lowercased()) {
-                images.append(url)
-            }
-        }
-        images.sort {
-            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-        }
-
+        let images = ZipExtractor.imageFiles(under: outputDir)
         guard !images.isEmpty else { throw DocumentError.noImagesFound }
         return ComicArchive(pages: images)
     }

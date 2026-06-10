@@ -38,6 +38,11 @@ struct IOSRootView: View {
                         onClose: { closeDocument() }
                     )
                     .navigationBarTitleDisplayMode(.inline)
+                    // Fresh view identity per file. Without this, opening a
+                    // document while another is showing (onOpenURL, shared
+                    // file) reuses the reader's @State — stale pages, stale
+                    // restore tasks, even the previous book's content.
+                    .id(opened.fileURL)
                 }
             } else {
                 libraryView
@@ -191,9 +196,12 @@ struct IOSRootView: View {
 
         // 3. Try direct file access at synced paths (sometimes works for local iCloud files)
         for url in Self.candidateURLs(for: entry) {
-            if url.startAccessingSecurityScopedResource() || FileManager.default.isReadableFile(atPath: url.path) {
+            let started = url.startAccessingSecurityScopedResource()
+            if started || FileManager.default.isReadableFile(atPath: url.path) {
                 browserLog.info("Direct access at \(url.path, privacy: .public)")
                 openDocument(at: url)
+                // openDocument holds its own access; release the probe's.
+                if started { url.stopAccessingSecurityScopedResource() }
                 return
             }
         }
@@ -269,6 +277,12 @@ struct IOSRootView: View {
                 filename: url.lastPathComponent
             )
             let doc = ReaderDocument(content: content, rawData: data)
+            // Release the previous document's security scope before replacing
+            // it — otherwise opening a file while another is showing leaks the
+            // old scope for the rest of the session.
+            if let previous = openedDocument, previous.securityScoped {
+                previous.fileURL.stopAccessingSecurityScopedResource()
+            }
             openedDocument = OpenedDocument(
                 document: doc,
                 fileURL: url,

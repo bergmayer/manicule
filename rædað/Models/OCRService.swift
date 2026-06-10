@@ -27,7 +27,10 @@ actor OCRService {
 
         guard let cgImage = loadCGImage(from: imageURL) else { return [] }
 
-        let results = await performOCR(on: cgImage)
+        let results = performOCR(on: cgImage)
+        // Entries for closed documents are never evicted individually (their
+        // temp URLs are unique per open), so cap the cache to bound memory.
+        if cache.count >= 500 { cache.removeAll() }
         cache[imageURL] = results
         return results
     }
@@ -57,29 +60,21 @@ actor OCRService {
         #endif
     }
 
-    private func performOCR(on image: CGImage) async -> [OCRResult] {
-        await withCheckedContinuation { continuation in
-            let request = VNRecognizeTextRequest { request, error in
-                guard error == nil,
-                      let observations = request.results as? [VNRecognizedTextObservation] else {
-                    continuation.resume(returning: [])
-                    return
-                }
-                let results = observations.compactMap { obs -> OCRResult? in
-                    guard let candidate = obs.topCandidates(1).first else { return nil }
-                    return OCRResult(text: candidate.string, boundingBox: obs.boundingBox)
-                }
-                continuation.resume(returning: results)
-            }
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
+    /// Runs recognition synchronously on the actor. `perform` blocks until the
+    /// request completes, so reading `request.results` afterwards is safe and
+    /// avoids the completion-handler/continuation dance (which could double-
+    /// resume when `perform` both invokes the handler and throws).
+    private func performOCR(on image: CGImage) -> [OCRResult] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
 
-            let handler = VNImageRequestHandler(cgImage: image)
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(returning: [])
-            }
+        let handler = VNImageRequestHandler(cgImage: image)
+        guard (try? handler.perform([request])) != nil,
+              let observations = request.results else { return [] }
+        return observations.compactMap { obs -> OCRResult? in
+            guard let candidate = obs.topCandidates(1).first else { return nil }
+            return OCRResult(text: candidate.string, boundingBox: obs.boundingBox)
         }
     }
 }

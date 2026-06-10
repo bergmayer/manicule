@@ -141,7 +141,10 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         let filePath = requestURL.path
         let fileURL = URL(fileURLWithPath: filePath).standardized
 
-        guard fileURL.path.hasPrefix(baseURL.standardized.path) else {
+        // Component-boundary check: a plain prefix test would also admit
+        // sibling directories like ".../base-evil" for base ".../base".
+        let basePath = baseURL.standardized.path
+        guard fileURL.path == basePath || fileURL.path.hasPrefix(basePath + "/") else {
             task.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
