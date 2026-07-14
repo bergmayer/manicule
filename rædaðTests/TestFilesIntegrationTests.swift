@@ -60,15 +60,16 @@ final class TestFilesIntegrationTests: XCTestCase {
 
     // MARK: - Discovery
 
-    func testTestFilesDirectoryExists() {
-        XCTAssertTrue(
-            FileManager.default.fileExists(atPath: Self.testFilesDir.path),
-            "test_files/ directory not found at \(Self.testFilesDir.path). Create it and add files to test."
-        )
+    func testTestFilesDirectoryExists() throws {
+        guard FileManager.default.fileExists(atPath: Self.testFilesDir.path) else {
+            throw XCTSkip("Optional test_files/ corpus is not installed at \(Self.testFilesDir.path)")
+        }
     }
 
-    func testAtLeastOneTestFile() {
-        XCTAssertFalse(Self.testFiles.isEmpty, "No supported files found in test_files/")
+    func testAtLeastOneTestFile() throws {
+        guard !Self.testFiles.isEmpty else {
+            throw XCTSkip("Optional test_files/ corpus contains no supported documents")
+        }
     }
 
     // MARK: - Parsing (all formats)

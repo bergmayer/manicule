@@ -13,6 +13,7 @@ struct r_da_App: App {
         #if os(iOS)
         WindowGroup {
             IOSRootView()
+                .preferenceErrorAlert()
         }
         .commands {
             ReaderMenuCommands()
@@ -23,6 +24,7 @@ struct r_da_App: App {
                 document: configuration.document,
                 fileURL: configuration.fileURL
             )
+            .preferenceErrorAlert()
         }
         .defaultSize(width: 800, height: 1000)
         .windowToolbarStyle(.unified(showsTitle: false))
@@ -40,6 +42,7 @@ struct r_da_App: App {
                     .tabItem { Label("Books", systemImage: "books.vertical") }
             }
             .frame(minWidth: 560, idealWidth: 600, maxWidth: 640, minHeight: 600)
+            .preferenceErrorAlert()
         }
         #endif
     }

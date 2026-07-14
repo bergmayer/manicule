@@ -3,6 +3,17 @@ import SwiftUI
 /// Namespace for shared reader utility functions.
 enum ReaderHelpers {
 
+    /// Migrates persisted state from the historical prefix-only content hash
+    /// to the current complete-file hash.
+    @MainActor
+    static func migrateLegacyIdentity(data: Data, currentHash: String?) {
+        guard let currentHash else { return }
+        let legacyHash = FileHasher.legacyHash(data: data)
+        guard legacyHash != currentHash else { return }
+        BookmarkStore.shared.migrateIdentity(from: legacyHash, to: currentHash)
+        ReadingPreferences.shared.migrateIdentity(from: legacyHash, to: currentHash)
+    }
+
     // MARK: - Automatic Two-Up Resolution
 
     /// Resolves the auto two-up state from the current view size, used for
@@ -96,7 +107,10 @@ enum ReaderHelpers {
         if let existing = store.bookmarkAt(fileHash: hash, position: position) {
             store.removeBookmark(id: existing.id)
         } else {
-            store.addBookmark(position, for: url, data: rawData, tocLabel: tocLabel)
+            store.addBookmark(
+                position, for: url, data: rawData,
+                tocLabel: tocLabel, fileHash: hash
+            )
         }
     }
 

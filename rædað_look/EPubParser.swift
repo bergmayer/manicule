@@ -7,6 +7,7 @@ enum EPubParser: Sendable {
     nonisolated static func parse(data: Data) throws -> EPubBook {
         // 1. Extract ZIP archive
         let extractionDir = try ZipExtractor.extract(data: data)
+        let extractionLease = TemporaryDirectoryLease(url: extractionDir)
 
         // 2. Parse META-INF/container.xml to find the OPF file path
         let containerURL = extractionDir
@@ -18,7 +19,9 @@ enum EPubParser: Sendable {
         let opfRelativePath = try parseContainer(data: containerData)
 
         // 3. Parse the OPF file
-        let opfURL = extractionDir.appendingPathComponent(opfRelativePath)
+        guard let opfURL = resolvedFile(opfRelativePath, under: extractionDir) else {
+            throw DocumentError.parsingFailed("OPF path escapes the publication archive")
+        }
         guard let opfData = try? Data(contentsOf: opfURL) else {
             throw DocumentError.parsingFailed("Cannot read OPF file at \(opfRelativePath)")
         }
@@ -40,7 +43,7 @@ enum EPubParser: Sendable {
         )
 
         return EPubBook(
-            extractionDirectory: extractionDir,
+            extractionLease: extractionLease,
             metadata: opfResult.metadata,
             manifest: adjustedManifest,
             spine: opfResult.spine,
@@ -56,7 +59,10 @@ enum EPubParser: Sendable {
         let delegate = ContainerParserDelegate()
         let parser = XMLParser(data: data)
         parser.delegate = delegate
-        parser.parse()
+        guard parser.parse() else {
+            throw DocumentError.parsingFailed(
+                parser.parserError?.localizedDescription ?? "Invalid container.xml")
+        }
 
         guard let path = delegate.opfPath else {
             throw DocumentError.parsingFailed("No rootfile found in container.xml")
@@ -78,7 +84,10 @@ enum EPubParser: Sendable {
         let delegate = OPFParserDelegate()
         let parser = XMLParser(data: data)
         parser.delegate = delegate
-        parser.parse()
+        guard parser.parse() else {
+            throw DocumentError.parsingFailed(
+                parser.parserError?.localizedDescription ?? "Invalid OPF package")
+        }
 
         let metadata = EPubBook.Metadata(
             title: delegate.title ?? "Untitled",
@@ -97,6 +106,15 @@ enum EPubParser: Sendable {
 
     // MARK: - Path Resolution
 
+    nonisolated private static func resolvedFile(_ path: String, under root: URL) -> URL? {
+        guard !path.contains("\0") else { return nil }
+        let rootURL = root.standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = root.appendingPathComponent(path)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        return candidate.path == rootURL.path
+            || candidate.path.hasPrefix(rootURL.path + "/") ? candidate : nil
+    }
+
     /// Converts manifest hrefs from OPF-relative to extraction-root-relative paths.
     nonisolated private static func adjustManifestPaths(
         _ manifest: [String: EPubBook.ManifestItem],
@@ -104,17 +122,15 @@ enum EPubParser: Sendable {
         extractionRoot: URL
     ) -> [String: EPubBook.ManifestItem] {
         var adjusted: [String: EPubBook.ManifestItem] = [:]
-        let rootPath = extractionRoot.path
+        let rootPath = extractionRoot.standardizedFileURL.resolvingSymlinksInPath().path
 
         for (id, item) in manifest {
-            let absoluteURL = opfDir.appendingPathComponent(item.href).standardized
-            var relativePath = absoluteURL.path
-            if relativePath.hasPrefix(rootPath) {
-                relativePath = String(relativePath.dropFirst(rootPath.count))
-                if relativePath.hasPrefix("/") {
-                    relativePath = String(relativePath.dropFirst())
-                }
-            }
+            let absoluteURL = opfDir.appendingPathComponent(item.href)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            guard absoluteURL.path == rootPath
+                    || absoluteURL.path.hasPrefix(rootPath + "/") else { continue }
+            var relativePath = String(absoluteURL.path.dropFirst(rootPath.count))
+            if relativePath.hasPrefix("/") { relativePath.removeFirst() }
             adjusted[id] = EPubBook.ManifestItem(
                 id: item.id,
                 href: relativePath,
@@ -167,7 +183,10 @@ enum EPubParser: Sendable {
         let delegate = NCXParserDelegate(basePath: basePath)
         let parser = XMLParser(data: data)
         parser.delegate = delegate
-        parser.parse()
+        guard parser.parse() else {
+            throw DocumentError.parsingFailed(
+                parser.parserError?.localizedDescription ?? "Invalid NCX table of contents")
+        }
         return delegate.entries
     }
 
@@ -178,7 +197,10 @@ enum EPubParser: Sendable {
         let delegate = NavXHTMLParserDelegate(basePath: basePath)
         let parser = XMLParser(data: data)
         parser.delegate = delegate
-        parser.parse()
+        guard parser.parse() else {
+            throw DocumentError.parsingFailed(
+                parser.parserError?.localizedDescription ?? "Invalid navigation document")
+        }
         return delegate.entries
     }
 }
@@ -306,9 +328,14 @@ private final class NCXParserDelegate: NSObject, XMLParserDelegate, @unchecked S
     let basePath: String
     nonisolated(unsafe) var entries: [EPubBook.TOCEntry] = []
 
-    nonisolated(unsafe) private var entryStack: [[EPubBook.TOCEntry]] = [[]]
-    nonisolated(unsafe) private var currentTitle: String = ""
-    nonisolated(unsafe) private var currentSrc: String = ""
+    private struct PendingNavPoint {
+        var title = ""
+        var source = ""
+        var children: [EPubBook.TOCEntry] = []
+
+        nonisolated init() {}
+    }
+    nonisolated(unsafe) private var navPointStack: [PendingNavPoint] = []
     nonisolated(unsafe) private var inNavLabel = false
     nonisolated(unsafe) private var inText = false
     nonisolated(unsafe) private var navPointCounter = 0
@@ -325,20 +352,24 @@ private final class NCXParserDelegate: NSObject, XMLParserDelegate, @unchecked S
         qualifiedName: String?,
         attributes attributeDict: [String: String] = [:]
     ) {
-        switch elementName {
+        let localName = elementName.components(separatedBy: ":").last ?? elementName
+        switch localName {
         case "navPoint":
-            currentTitle = ""
-            currentSrc = ""
-            entryStack.append([])
+            navPointStack.append(PendingNavPoint())
 
         case "navLabel":
             inNavLabel = true
 
         case "text":
-            if inNavLabel { inText = true; currentTitle = "" }
+            if inNavLabel {
+                inText = true
+                if !navPointStack.isEmpty { navPointStack[navPointStack.count - 1].title = "" }
+            }
 
         case "content":
-            currentSrc = attributeDict["src"] ?? ""
+            if !navPointStack.isEmpty {
+                navPointStack[navPointStack.count - 1].source = attributeDict["src"] ?? ""
+            }
 
         default:
             break
@@ -346,8 +377,8 @@ private final class NCXParserDelegate: NSObject, XMLParserDelegate, @unchecked S
     }
 
     nonisolated func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if inText {
-            currentTitle += string
+        if inText, !navPointStack.isEmpty {
+            navPointStack[navPointStack.count - 1].title += string
         }
     }
 
@@ -357,7 +388,8 @@ private final class NCXParserDelegate: NSObject, XMLParserDelegate, @unchecked S
         namespaceURI: String?,
         qualifiedName: String?
     ) {
-        switch elementName {
+        let localName = elementName.components(separatedBy: ":").last ?? elementName
+        switch localName {
         case "text":
             inText = false
 
@@ -365,23 +397,22 @@ private final class NCXParserDelegate: NSObject, XMLParserDelegate, @unchecked S
             inNavLabel = false
 
         case "navPoint":
+            guard let navPoint = navPointStack.popLast() else { return }
             navPointCounter += 1
-            let children = entryStack.removeLast()
-            let resolvedHref = resolveHref(currentSrc)
             let entry = EPubBook.TOCEntry(
                 id: "ncx-\(navPointCounter)",
-                title: currentTitle.trimmingCharacters(in: .whitespacesAndNewlines),
-                href: resolvedHref,
-                children: children
+                title: navPoint.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                href: resolveHref(navPoint.source),
+                children: navPoint.children
             )
-            if entryStack.isEmpty {
-                entryStack.append([entry])
+            if navPointStack.isEmpty {
+                entries.append(entry)
             } else {
-                entryStack[entryStack.count - 1].append(entry)
+                navPointStack[navPointStack.count - 1].children.append(entry)
             }
 
         case "navMap":
-            entries = entryStack.last ?? []
+            break
 
         default:
             break

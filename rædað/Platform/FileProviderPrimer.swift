@@ -13,6 +13,19 @@ private nonisolated let primerLog = Logger(subsystem: "com.palefire.raedad", cat
 /// across launches. Capturing the `(domain, item)` pair and asking the
 /// provider to re-vend a URL at open time is the only durable handle we get.
 enum FileProviderPrimer {
+    enum ResolveBudget {
+        case probe
+        case prewarm
+
+        nonisolated var delaysMillis: [UInt64] {
+            switch self {
+            case .probe:
+                return [0]
+            case .prewarm:
+                return [0, 400, 1000, 1700, 1900]
+            }
+        }
+    }
 
     /// Called once at app start. Wakes registered FileProvider extensions and
     /// fires per-book resolves in the background for the top-N most-recently-
@@ -30,24 +43,31 @@ enum FileProviderPrimer {
         // Wake registered providers even if we have no candidates — a user
         // about to pick a new file via the locator benefits from a warmer
         // extension.
-        _ = try? await NSFileProviderManager.domains()
+        await wakeProviders()
 
         guard !candidates.isEmpty else { return }
         primerLog.info("Pre-warm: nudging FileProvider for \(candidates.count) recent books")
 
         for (name, ref) in candidates {
             Task.detached(priority: .background) {
-                if (await resolveFileProviderURL(ref)) != nil {
+                if (await resolveFileProviderURL(ref, budget: .prewarm)) != nil {
                     primerLog.info("Pre-warm: \(name, privacy: .public) primed")
                 }
             }
         }
     }
 
+    /// Nudge the system to load registered File Provider domains. Useful even
+    /// when we don't yet have a captured item identifier for an older recent
+    /// entry, because provider registration often precedes saved-path access.
+    nonisolated static func wakeProviders() async {
+        _ = try? await NSFileProviderManager.domains()
+    }
+
     /// Ask the FileProvider system for stable identifiers for this URL and
     /// remember them. Silently no-ops for files not vended by a file provider
     /// (sandbox imports, Inbox files, etc.).
-    static func captureFileProviderRef(url: URL, fileHash: String) async {
+    nonisolated static func captureFileProviderRef(url: URL, fileHash: String) async {
         primerLog.info("Attempting FP capture for \(url.lastPathComponent, privacy: .public)")
         do {
             let (itemID, domainID) = try await NSFileProviderManager.identifierForUserVisibleFile(at: url)
@@ -68,15 +88,13 @@ enum FileProviderPrimer {
     /// previously-captured (domain, item) reference. Returns nil if the
     /// provider can't fulfill it.
     ///
-    /// Retries with backoff because cold-booted third-party providers can
-    /// take a few seconds to register their domain and authenticate. Total
-    /// budget ~5 s; the launch-time pre-warm should make most calls hit the
-    /// 0 ms attempt anyway.
-    static func resolveFileProviderURL(_ ref: FileProviderRef) async -> URL? {
-        let delaysMillis: [UInt64] = [0, 400, 1000, 1700, 1900]
+    /// Uses the requested budget: recents use a single probe, while launch-time
+    /// prewarming can retry in the background without putting UI in front of
+    /// the user.
+    nonisolated static func resolveFileProviderURL(_ ref: FileProviderRef, budget: ResolveBudget = .probe) async -> URL? {
         let domainID = NSFileProviderDomainIdentifier(ref.domain)
         let itemID = NSFileProviderItemIdentifier(ref.item)
-        for (attempt, delay) in delaysMillis.enumerated() {
+        for (attempt, delay) in budget.delaysMillis.enumerated() {
             if delay > 0 {
                 try? await Task.sleep(nanoseconds: delay * 1_000_000)
             }

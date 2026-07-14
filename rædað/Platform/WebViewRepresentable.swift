@@ -20,6 +20,10 @@ struct WebViewContent: Equatable {
     var twoUp: Bool? = nil        // nil = auto, true/false = manual override
     var isEPub: Bool = false      // true = foliate-js ePub mode
     var bookFileURL: URL? = nil   // EPUB file URL for scheme handler (ePub mode only)
+    /// Optional directory containing resources referenced by generated HTML.
+    /// Markdown uses this to resolve relative images without granting the web
+    /// view access outside the source document's directory.
+    var resourceBaseURL: URL? = nil
     // Text reader paginated mode: both margin pairs are sent so the JS bridge
     // can pick the right one based on its resolved column count and re-pick
     // when the layout flips on rotation, without a Swift round trip.
@@ -34,7 +38,7 @@ struct WebViewContent: Equatable {
         }
         return lhs.fileURL == rhs.fileURL && lhs.fragment == rhs.fragment
             && lhs.cssOverride == rhs.cssOverride && lhs.paginated == rhs.paginated
-            && lhs.twoUp == rhs.twoUp
+            && lhs.twoUp == rhs.twoUp && lhs.resourceBaseURL == rhs.resourceBaseURL
     }
 
     /// Builds a custom-scheme URL for loading through the scheme handler.
@@ -60,10 +64,12 @@ struct WebViewContent: Equatable {
 ///
 /// Routes requests by host:
 /// - `epub-local://local/<path>` — existing text reader files (path under baseURL)
+/// - `epub-local://document/<path>` — resources beside a generated document
 /// - `epub-local://bundle/<path>` — app bundle Resources directory
 /// - `epub-local://book/<path>` — EPUB file for foliate-js to fetch
 final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     var baseURL: URL
+    var documentResourceURL: URL?
     var bundleResourceURL: URL?
     var bookFileURL: URL?
 
@@ -85,9 +91,17 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         case "bundle":
             serveBundleResource(requestURL: requestURL, task: urlSchemeTask)
         case "book":
-            serveBookFile(requestURL: requestURL, task: urlSchemeTask)
-        default:
+            if requestURL.path == "/book.epub" {
+                serveBookFile(requestURL: requestURL, task: urlSchemeTask)
+            } else {
+                urlSchemeTask.didFailWithError(URLError(.unsupportedURL))
+            }
+        case "local":
             serveLocalFile(requestURL: requestURL, task: urlSchemeTask)
+        case "document":
+            serveDocumentResource(requestURL: requestURL, task: urlSchemeTask)
+        default:
+            urlSchemeTask.didFailWithError(URLError(.unsupportedURL))
         }
     }
 
@@ -99,7 +113,7 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         let relativePath = String(requestURL.path.dropFirst())
 
         // Serve book.epub from the bookFileURL (same origin to avoid CORS issues)
-        if relativePath == "book.epub" || relativePath.hasSuffix("/book.epub") {
+        if relativePath == "book.epub" {
             serveBookFile(requestURL: requestURL, task: task)
             return
         }
@@ -109,13 +123,20 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
 
-        var fileURL = bundleURL.appendingPathComponent(relativePath)
+        guard var fileURL = Self.resolvedFile(relativePath: relativePath, under: bundleURL) else {
+            task.didFailWithError(URLError(.noPermissionsToReadFile))
+            return
+        }
 
         // Xcode flattens resource directories. If the exact path doesn't exist,
         // fall back to just the filename (handles foliate-js/vendor/* imports).
         if !FileManager.default.fileExists(atPath: fileURL.path) {
             let filename = (relativePath as NSString).lastPathComponent
-            fileURL = bundleURL.appendingPathComponent(filename)
+            guard let flattenedURL = Self.resolvedFile(relativePath: filename, under: bundleURL) else {
+                task.didFailWithError(URLError(.noPermissionsToReadFile))
+                return
+            }
+            fileURL = flattenedURL
         }
 
         guard let data = try? Data(contentsOf: fileURL) else {
@@ -141,10 +162,7 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         let filePath = requestURL.path
         let fileURL = URL(fileURLWithPath: filePath).standardized
 
-        // Component-boundary check: a plain prefix test would also admit
-        // sibling directories like ".../base-evil" for base ".../base".
-        let basePath = baseURL.standardized.path
-        guard fileURL.path == basePath || fileURL.path.hasPrefix(basePath + "/") else {
+        guard Self.isContained(fileURL, under: baseURL) else {
             task.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
@@ -158,6 +176,65 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         respond(task: task, url: requestURL, data: data, mimeType: mimeType)
     }
 
+    private func serveDocumentResource(requestURL: URL, task: any WKURLSchemeTask) {
+        guard let root = documentResourceURL,
+              let fileURL = Self.resolvedFile(
+                relativePath: String(requestURL.path.dropFirst()),
+                under: root
+              ),
+              let data = try? Data(contentsOf: fileURL) else {
+            task.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+
+        respond(
+            task: task,
+            url: requestURL,
+            data: data,
+            mimeType: Self.mimeType(for: fileURL.pathExtension)
+        )
+    }
+
+    /// Resolves a URL below `root`, rejecting dot components, absolute paths,
+    /// NULs, and symlinks that escape the allowed directory.
+    static func resolvedFile(relativePath: String, under root: URL) -> URL? {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !relativePath.contains("\0") else { return nil }
+
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+
+        let candidate = root.appendingPathComponent(relativePath).standardizedFileURL
+        return isContained(candidate, under: root) ? candidate : nil
+    }
+
+    static func isContained(_ fileURL: URL, under root: URL) -> Bool {
+        let resolvedRoot = resolvingSymlinksThroughExistingAncestor(root)
+        let resolvedFile = resolvingSymlinksThroughExistingAncestor(fileURL)
+        let rootPath = resolvedRoot.path
+        return resolvedFile.path == rootPath || resolvedFile.path.hasPrefix(rootPath + "/")
+    }
+
+    /// `URL.resolvingSymlinksInPath()` stops short when the leaf does not yet
+    /// exist. Resolve the nearest existing ancestor first, then append any
+    /// missing suffix, so an intermediate symlink cannot disguise an escape.
+    private static func resolvingSymlinksThroughExistingAncestor(_ url: URL) -> URL {
+        var existing = url.standardizedFileURL
+        var suffix: [String] = []
+        while existing.path != "/",
+              !FileManager.default.fileExists(atPath: existing.path) {
+            suffix.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+        }
+
+        var resolved = existing.resolvingSymlinksInPath().standardizedFileURL
+        for component in suffix {
+            resolved.appendPathComponent(component)
+        }
+        return resolved.standardizedFileURL
+    }
+
     private func respond(task: any WKURLSchemeTask, url: URL, data: Data, mimeType: String) {
         let encoding = mimeType.hasPrefix("text/") || mimeType.contains("javascript")
             || mimeType.contains("json") || mimeType.contains("xml")
@@ -169,7 +246,6 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
             headerFields: [
                 "Content-Type": "\(mimeType)\(encoding)",
                 "Content-Length": "\(data.count)",
-                "Access-Control-Allow-Origin": "*",
             ]
         )!
         task.didReceive(response)
@@ -189,11 +265,20 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         case "gif": return "image/gif"
         case "svg": return "image/svg+xml"
         case "webp": return "image/webp"
+        case "avif": return "image/avif"
+        case "bmp": return "image/bmp"
+        case "tif", "tiff": return "image/tiff"
         case "woff": return "font/woff"
         case "woff2": return "font/woff2"
         case "ttf": return "font/ttf"
         case "otf": return "font/otf"
         case "xml": return "application/xml"
+        case "mp3": return "audio/mpeg"
+        case "m4a": return "audio/mp4"
+        case "wav": return "audio/wav"
+        case "ogg": return "audio/ogg"
+        case "mp4", "m4v": return "video/mp4"
+        case "webm": return "video/webm"
         case "epub": return "application/epub+zip"
         default: return "application/octet-stream"
         }
@@ -270,6 +355,7 @@ struct WebViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let handler = LocalFileSchemeHandler(baseURL: content.baseURL)
+        handler.documentResourceURL = content.resourceBaseURL
         if content.isEPub {
             handler.bundleResourceURL = Bundle.main.resourceURL
             handler.bookFileURL = content.bookFileURL
@@ -323,9 +409,12 @@ struct WebViewRepresentable: NSViewRepresentable {
             // ePub: update scheme handler book URL
             coord.schemeHandler?.bookFileURL = content.bookFileURL
 
-            // Load reader.html if not loaded yet
-            if coord.currentFileURL != content.schemeURL {
+            // Reload the host page when the SwiftUI view is reused for a
+            // different book. The host URL itself is intentionally stable.
+            if coord.currentFileURL != content.schemeURL
+                || coord.currentBookFileURL != content.bookFileURL {
                 coord.currentFileURL = content.schemeURL
+                coord.currentBookFileURL = content.bookFileURL
                 nsView.load(URLRequest(url: content.schemeURL))
             }
         } else {
@@ -337,6 +426,7 @@ struct WebViewRepresentable: NSViewRepresentable {
             let paginatedChanged = coord.paginated != content.paginated
             coord.paginated = content.paginated
             coord.schemeHandler?.baseURL = content.baseURL
+            coord.schemeHandler?.documentResourceURL = content.resourceBaseURL
             coord.wireTextProxy(proxy) { [weak nsView] in
                 DispatchQueue.main.async {
                     guard let wv = nsView else { return }
@@ -344,8 +434,8 @@ struct WebViewRepresentable: NSViewRepresentable {
                 }
             }
 
-            if coord.currentFileURL != content.fileURL || paginatedChanged {
-                coord.currentFileURL = content.fileURL
+            if coord.currentFileURL != content.schemeURL || paginatedChanged {
+                coord.currentFileURL = content.schemeURL
                 coord.currentMarginsOneUp = content.marginsOneUp
                 coord.currentMarginsTwoUp = content.marginsTwoUp
                 coord.currentTwoUp = content.twoUp
@@ -393,6 +483,7 @@ struct WebViewRepresentable: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let handler = LocalFileSchemeHandler(baseURL: content.baseURL)
+        handler.documentResourceURL = content.resourceBaseURL
         if content.isEPub {
             handler.bundleResourceURL = Bundle.main.resourceURL
             handler.bookFileURL = content.bookFileURL
@@ -500,8 +591,10 @@ struct WebViewRepresentable: UIViewRepresentable {
                 uiView.addGestureRecognizer(pan)
             }
 
-            if coord.currentFileURL != content.schemeURL {
+            if coord.currentFileURL != content.schemeURL
+                || coord.currentBookFileURL != content.bookFileURL {
                 coord.currentFileURL = content.schemeURL
+                coord.currentBookFileURL = content.bookFileURL
                 uiView.load(URLRequest(url: content.schemeURL))
             }
         } else {
@@ -512,6 +605,7 @@ struct WebViewRepresentable: UIViewRepresentable {
             let paginatedChanged = coord.paginated != content.paginated
             coord.paginated = content.paginated
             coord.schemeHandler?.baseURL = content.baseURL
+            coord.schemeHandler?.documentResourceURL = content.resourceBaseURL
             coord.wireTextProxy(proxy) { [weak uiView] in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     uiView?.becomeFirstResponder()
@@ -536,8 +630,8 @@ struct WebViewRepresentable: UIViewRepresentable {
                 }
             }
 
-            if coord.currentFileURL != content.fileURL || paginatedChanged {
-                coord.currentFileURL = content.fileURL
+            if coord.currentFileURL != content.schemeURL || paginatedChanged {
+                coord.currentFileURL = content.schemeURL
                 coord.currentMarginsOneUp = content.marginsOneUp
                 coord.currentMarginsTwoUp = content.marginsTwoUp
                 coord.currentTwoUp = content.twoUp
@@ -580,6 +674,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     weak var webView: WKWebView?
     var schemeHandler: LocalFileSchemeHandler?
     var currentFileURL: URL?
+    var currentBookFileURL: URL?
     var isEPub: Bool = false
     private var tornDown = false
 
@@ -791,6 +886,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         var currentPageIdx = 0;
         var animationId = null;
         var pageTurnLock = false;
+        var pendingPageRequests = [];
         var forceTwoUp = null;
         var isTwoPage = false;
         var cachedColWidth = 0;
@@ -923,8 +1019,31 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         }
         function unlockPageTurn() {
             pageTurnLock = false;
+            lockedWheelQueued = false;
             clearTimeout(pageTurnLockTimer);
             pageTurnLockTimer = null;
+            requestAnimationFrame(processPendingPageRequest);
+        }
+        function enqueuePageRequest(request) {
+            // A bounded queue prevents a stuck key or gesture recognizer from
+            // scheduling minutes of navigation, while preserving normal rapid
+            // repeated input in order.
+            if (pendingPageRequests.length < 100) pendingPageRequests.push(request);
+        }
+        function processPendingPageRequest() {
+            if (pageTurnLock || pendingPageRequests.length === 0) return;
+            var request = pendingPageRequests.shift();
+            if (request.type === 'delta') {
+                if (request.value > 0) nextPage(); else prevPage();
+            } else if (request.type === 'page') {
+                goToPage(request.value, true);
+            } else if (request.type === 'end') {
+                goToEnd(true);
+            }
+            // Boundary requests do not start an animation, so continue
+            // draining rather than waiting for an unlock that will not occur.
+            if (!pageTurnLock && pendingPageRequests.length > 0)
+                requestAnimationFrame(processPendingPageRequest);
         }
 
         function animateScroll(from, to, duration, easeFn, onComplete) {
@@ -998,7 +1117,10 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         }
 
         function nextPage() {
-            if (pageTurnLock) return;
+            if (pageTurnLock) {
+                enqueuePageRequest({type: 'delta', value: 1});
+                return;
+            }
             if (currentPageIdx >= totalPages() - 1) {
                 window.webkit.messageHandlers.pageHandler.postMessage({boundary: 'next'});
             } else {
@@ -1007,7 +1129,10 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         }
 
         function prevPage() {
-            if (pageTurnLock) return;
+            if (pageTurnLock) {
+                enqueuePageRequest({type: 'delta', value: -1});
+                return;
+            }
             if (currentPageIdx <= 0) {
                 window.webkit.messageHandlers.pageHandler.postMessage({boundary: 'previous'});
             } else {
@@ -1238,7 +1363,6 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         // --- Keyboard ---
         function handleKeydown(e) {
             if (currentMode !== 'paginated') return;
-            if (pageTurnLock) { e.preventDefault(); return; }
             if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
                 e.preventDefault(); nextPage();
             } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
@@ -1248,9 +1372,13 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             } else if (e.key === ' ' && e.shiftKey) {
                 e.preventDefault(); prevPage();
             } else if (e.key === 'Home') {
-                e.preventDefault(); goToPage(0, true);
+                e.preventDefault();
+                if (pageTurnLock) enqueuePageRequest({type: 'page', value: 0});
+                else goToPage(0, true);
             } else if (e.key === 'End') {
-                e.preventDefault(); goToEnd(true);
+                e.preventDefault();
+                if (pageTurnLock) enqueuePageRequest({type: 'end'});
+                else goToEnd(true);
             }
         }
 
@@ -1394,6 +1522,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         var wheelTimeout = null;
         var wheelVelocityTracker = [];
         var isWheelActive = false;
+        var lockedWheelQueued = false;
         var lastWheelTime = 0;
         var lastWheelDelta = 0;
         var lastWheelDir = 0;
@@ -1402,10 +1531,16 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         function handleWheel(e) {
             if (currentMode !== 'paginated') return;
             e.preventDefault();
-            if (pageTurnLock && !isWheelActive) return;
             var now = performance.now();
             var delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
             var absDelta = Math.abs(delta);
+            if (pageTurnLock && !isWheelActive) {
+                if (!lockedWheelQueued && absDelta > 2) {
+                    lockedWheelQueued = true;
+                    enqueuePageRequest({type: 'delta', value: delta > 0 ? 1 : -1});
+                }
+                return;
+            }
 
             // Momentum detection — skip inertial events
             var dir = delta > 0 ? 1 : (delta < 0 ? -1 : 0);
@@ -2031,6 +2166,48 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
     // MARK: - WKNavigationDelegate
 
+    nonisolated func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        let policy = MainActor.assumeIsolated {
+            guard let url = navigationAction.request.url,
+                  let scheme = url.scheme?.lowercased() else {
+                return WKNavigationActionPolicy.cancel
+            }
+
+            // Reader links belong in the system browser/mail app. Do not let
+            // an untrusted publication replace either the host page or one of
+            // its content frames with a network document.
+            if navigationAction.navigationType == .linkActivated,
+               ["http", "https", "mailto", "tel"].contains(scheme) {
+                openExternally(url)
+                return .cancel
+            }
+
+            let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+            if isMainFrame {
+                // The only main-frame navigation allowed is the exact host or
+                // generated-document URL that Swift asked WebKit to load.
+                return url == currentFileURL ? .allow : .cancel
+            }
+
+            // Foliate renders replaced publication resources in blob frames.
+            // about:blank is used while those frames are being constructed.
+            return [epubScheme, "blob", "about"].contains(scheme) ? .allow : .cancel
+        }
+        decisionHandler(policy)
+    }
+
+    private func openExternally(_ url: URL) {
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #else
+        UIApplication.shared.open(url)
+        #endif
+    }
+
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {}
 
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {}
@@ -2134,12 +2311,11 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         case "bookOpened":
             webLog.info("Book opened")
         case "externalLink":
-            if let href = body["href"] as? String, let url = URL(string: href) {
-                #if os(macOS)
-                NSWorkspace.shared.open(url)
-                #else
-                UIApplication.shared.open(url)
-                #endif
+            if let href = body["href"] as? String,
+               let url = URL(string: href),
+               let scheme = url.scheme?.lowercased(),
+               ["http", "https", "mailto", "tel"].contains(scheme) {
+                openExternally(url)
             }
         case "flowChanged":
             #if os(iOS)
@@ -2198,4 +2374,3 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 #if os(iOS)
 extension WebViewCoordinator: UIGestureRecognizerDelegate {}
 #endif
-

@@ -30,6 +30,7 @@ final class ReadingPreferences {
 
     /// Keyed by file hash prefix. If a key exists, its values override the global defaults.
     private(set) var perBookOverrides: [String: BookOverride] = [:]
+    private(set) var lastError: String?
 
     // MARK: - Persistence Keys
 
@@ -37,15 +38,41 @@ final class ReadingPreferences {
     private let cloud = NSUbiquitousKeyValueStore.default
     private let globalKey = "raedad.readingPrefs.global"
     private let overridesKey = "raedad.readingPrefs.overrides"
+    private let tombstonesKey = "raedad.readingPrefs.overrideTombstones"
+    private var overrideTombstones: [String: Date] = [:]
+    private var cloudObserver: NSObjectProtocol?
 
     /// Maximum number of per-book overrides to keep.
     static let maxOverrides = 60
 
     private init() {
         loadFromDefaults()
+        mergeFromCloudIfAvailable()
+        save()
+        cloudObserver = NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: cloud,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.mergeFromCloudIfAvailable(refreshPinnedState: true)
+            }
+        }
+        cloud.synchronize()
     }
 
     // MARK: - Effective Preferences
+
+    func migrateIdentity(from legacyHash: String, to fileHash: String) {
+        guard legacyHash != fileHash,
+              let legacy = perBookOverrides.removeValue(forKey: legacyHash) else { return }
+        if perBookOverrides[fileHash] == nil {
+            perBookOverrides[fileHash] = legacy
+        }
+        overrideTombstones[legacyHash] = Date()
+        save()
+        BookmarkStore.shared.refreshPinnedStatus(for: fileHash)
+    }
 
     /// Returns the effective preferences for a specific file, merging per-book overrides if present.
     func effective(for fileHash: String?) -> EffectivePreferences {
@@ -105,33 +132,56 @@ final class ReadingPreferences {
     func setOverride(for fileHash: String, override: BookOverride) -> String? {
         // Allow updating existing overrides even when at limit
         if perBookOverrides[fileHash] == nil && perBookOverrides.count >= Self.maxOverrides {
-            return "You have \(Self.maxOverrides) books with custom settings. Please remove some in Settings > Books before adding more."
+            let message = "You have \(Self.maxOverrides) books with custom settings. Please remove some in Settings > Books before adding more."
+            lastError = message
+            return message
         }
         var updated = override
         updated.lastUsed = Date()
+        updated.modifiedAt = Date()
         perBookOverrides[fileHash] = updated
+        overrideTombstones.removeValue(forKey: fileHash)
+        lastError = nil
         save()
+        BookmarkStore.shared.refreshPinnedStatus(for: fileHash)
         return nil
     }
 
     /// Removes the per-book override, reverting to global defaults.
     func removeOverride(for fileHash: String) {
-        perBookOverrides.removeValue(forKey: fileHash)
+        guard perBookOverrides.removeValue(forKey: fileHash) != nil else { return }
+        overrideTombstones[fileHash] = Date()
         save()
+        BookmarkStore.shared.refreshPinnedStatus(for: fileHash)
+    }
+
+    func clearAllOverrides() {
+        let hashes = Array(perBookOverrides.keys)
+        let now = Date()
+        for hash in hashes { overrideTombstones[hash] = now }
+        perBookOverrides.removeAll()
+        save()
+        for hash in hashes { BookmarkStore.shared.refreshPinnedStatus(for: hash) }
+    }
+
+    func clearLastError() {
+        lastError = nil
     }
 
     /// Updates a preference for a specific book. Always creates a per-book override
     /// when a fileHash is available, so view mode, twoUp, and other settings are
     /// tracked per-book and restored when reopening. Falls back to global default
     /// only when no fileHash is available.
-    func updatePreference(for fileHash: String?, apply: (inout BookOverride) -> Void, applyGlobal: () -> Void) {
+    @discardableResult
+    func updatePreference(for fileHash: String?, apply: (inout BookOverride) -> Void, applyGlobal: () -> Void) -> String? {
         if let hash = fileHash {
             var override = perBookOverrides[hash] ?? BookOverride()
             apply(&override)
-            setOverride(for: hash, override: override)
+            return setOverride(for: hash, override: override)
         } else {
             applyGlobal()
             save()
+            return nil
         }
     }
 
@@ -146,11 +196,10 @@ final class ReadingPreferences {
         )
     }
 
-    /// Persists current preferences. Both global defaults and per-book overrides
-    /// go to UserDefaults (device-local). Reading settings are intentionally NOT
-    /// synced — each device can have its own view mode, font size, etc. Bookmarks
-    /// and reading positions sync via iCloud in BookmarkStore.
-    func save() {
+    /// Global defaults remain device-local. Per-book overrides are also written
+    /// to iCloud KVS so a book keeps its chosen layout and typography on every
+    /// device, matching bookmark/position behavior.
+    func save(syncOverrides: Bool = true) {
         let global = GlobalPrefs(
             fontFamily: fontFamily,
             fontSize: fontSize,
@@ -172,6 +221,15 @@ final class ReadingPreferences {
         do {
             let data = try JSONEncoder().encode(perBookOverrides)
             defaults.set(data, forKey: overridesKey)
+            defaults.set(try JSONEncoder().encode(overrideTombstones), forKey: tombstonesKey)
+            if syncOverrides {
+                let payload = SyncedOverrides(
+                    overrides: perBookOverrides,
+                    tombstones: overrideTombstones
+                )
+                cloud.set(try JSONEncoder().encode(payload), forKey: overridesKey)
+                cloud.synchronize()
+            }
         } catch {
             Self.logger.error("Failed to encode per-book overrides: \(error)")
         }
@@ -196,15 +254,62 @@ final class ReadingPreferences {
            let overrides = try? JSONDecoder().decode([String: BookOverride].self, from: data) {
             perBookOverrides = overrides
         }
-        // Migrate overrides from iCloud to UserDefaults (one-time, reverse of old migration)
-        if perBookOverrides.isEmpty,
-           let cloudData = cloud.data(forKey: overridesKey),
-           let cloudOverrides = try? JSONDecoder().decode([String: BookOverride].self, from: cloudData) {
-            perBookOverrides = cloudOverrides
-            save()
-            cloud.removeObject(forKey: overridesKey)
-            cloud.synchronize()
+        if let data = defaults.data(forKey: tombstonesKey),
+           let tombstones = try? JSONDecoder().decode([String: Date].self, from: data) {
+            overrideTombstones = tombstones
         }
+    }
+
+    private func mergeFromCloudIfAvailable(refreshPinnedState: Bool = false) {
+        guard let data = cloud.data(forKey: overridesKey) else { return }
+        let previousHashes = Set(perBookOverrides.keys)
+        let payload: SyncedOverrides
+        if let decoded = try? JSONDecoder().decode(SyncedOverrides.self, from: data) {
+            payload = decoded
+        } else if let legacy = try? JSONDecoder().decode([String: BookOverride].self, from: data) {
+            payload = SyncedOverrides(overrides: legacy, tombstones: [:])
+        } else {
+            return
+        }
+
+        for (hash, date) in payload.tombstones {
+            if date > (overrideTombstones[hash] ?? .distantPast) {
+                overrideTombstones[hash] = date
+            }
+        }
+
+        for (hash, remote) in payload.overrides {
+            let local = perBookOverrides[hash]
+            let localDate = local?.modifiedAt ?? local?.lastUsed ?? .distantPast
+            let remoteDate = remote.modifiedAt ?? remote.lastUsed ?? .distantPast
+            var selected = remoteDate >= localDate ? remote : (local ?? remote)
+            if let remoteLastUsed = remote.lastUsed,
+               remoteLastUsed > (selected.lastUsed ?? .distantPast) {
+                selected.lastUsed = remoteLastUsed
+            }
+            perBookOverrides[hash] = selected
+        }
+
+        for (hash, deletedAt) in overrideTombstones {
+            if let value = perBookOverrides[hash],
+               deletedAt >= (value.modifiedAt ?? value.lastUsed ?? .distantPast) {
+                perBookOverrides.removeValue(forKey: hash)
+            }
+        }
+        // External merges are written back as a union so concurrent edits to
+        // different books on two devices are not lost to whole-dictionary
+        // last-writer-wins behavior. During init the caller performs one save.
+        save(syncOverrides: refreshPinnedState)
+        if refreshPinnedState {
+            for hash in previousHashes.union(perBookOverrides.keys) {
+                BookmarkStore.shared.refreshPinnedStatus(for: hash)
+            }
+        }
+    }
+
+    private struct SyncedOverrides: Codable {
+        var overrides: [String: BookOverride]
+        var tombstones: [String: Date]
     }
 
 }
@@ -371,6 +476,7 @@ struct BookOverride: Codable, Sendable {
     var trimWhitespace: Bool?
     var textAlign: TextAlignment?
     var lastUsed: Date?
+    var modifiedAt: Date?
 
     /// Returns true if all fields are nil (no overrides set).
     var isEmpty: Bool {
@@ -384,7 +490,7 @@ struct BookOverride: Codable, Sendable {
          marginsOneUp: MarginSettings? = nil, marginsTwoUp: MarginSettings? = nil,
          theme: ReaderTheme? = nil, viewMode: ViewMode? = nil, twoUp: Bool? = nil,
          reflowText: Bool? = nil, trimWhitespace: Bool? = nil, textAlign: TextAlignment? = nil,
-         lastUsed: Date? = nil) {
+         lastUsed: Date? = nil, modifiedAt: Date? = nil) {
         self.fontFamily = fontFamily
         self.fontSize = fontSize
         self.lineSpacing = lineSpacing
@@ -397,6 +503,7 @@ struct BookOverride: Codable, Sendable {
         self.trimWhitespace = trimWhitespace
         self.textAlign = textAlign
         self.lastUsed = lastUsed
+        self.modifiedAt = modifiedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -411,6 +518,7 @@ struct BookOverride: Codable, Sendable {
         trimWhitespace = try container.decodeIfPresent(Bool.self, forKey: .trimWhitespace)
         textAlign = try container.decodeIfPresent(TextAlignment.self, forKey: .textAlign)
         lastUsed = try container.decodeIfPresent(Date.self, forKey: .lastUsed)
+        modifiedAt = try container.decodeIfPresent(Date.self, forKey: .modifiedAt)
 
         // Backward compat: migrate old horizontalMargin to both margin structs
         if let oldMargin = try? container.decodeIfPresent(Double.self, forKey: .horizontalMargin) {
@@ -425,7 +533,7 @@ struct BookOverride: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case fontFamily, fontSize, lineSpacing, marginsOneUp, marginsTwoUp
-        case theme, viewMode, twoUp, reflowText, trimWhitespace, textAlign, lastUsed
+        case theme, viewMode, twoUp, reflowText, trimWhitespace, textAlign, lastUsed, modifiedAt
         case horizontalMargin // legacy key for backward compat decoding only
     }
 
@@ -443,6 +551,7 @@ struct BookOverride: Codable, Sendable {
         try container.encodeIfPresent(trimWhitespace, forKey: .trimWhitespace)
         try container.encodeIfPresent(textAlign, forKey: .textAlign)
         try container.encodeIfPresent(lastUsed, forKey: .lastUsed)
+        try container.encodeIfPresent(modifiedAt, forKey: .modifiedAt)
     }
 }
 

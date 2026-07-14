@@ -13,13 +13,13 @@ struct TextReaderView: View {
 
     private let fileHash: String?
 
-    init(content: TextContent, fileURL: URL?, rawData: Data, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
+    init(content: TextContent, fileURL: URL?, rawData: Data, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
         self.content = content
         self.fileURL = fileURL
         self.rawData = rawData
         self._showChrome = showChrome
         self.onClose = onClose
-        self.fileHash = FileHasher.hash(data: rawData)
+        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
     }
 
     @State private var scrollFraction: Double = 0.0
@@ -184,6 +184,7 @@ struct TextReaderView: View {
                 prepareHTMLFile()
             }
             .task {
+                ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
@@ -202,6 +203,9 @@ struct TextReaderView: View {
             .onDisappear {
                 autoSaveTimer?.invalidate()
                 autoSavePosition()
+                if let htmlBaseURL { try? FileManager.default.removeItem(at: htmlBaseURL) }
+                htmlFileURL = nil
+                htmlBaseURL = nil
                 #if os(iOS) || os(visionOS)
                 if readAloud.isActive { readAloud.dismiss() }
                 #endif
@@ -262,16 +266,18 @@ struct TextReaderView: View {
                     Divider()
                 }
                 Group {
-                    if useWebView, let fileURL = htmlFileURL, let baseURL = htmlBaseURL {
+                    if useWebView, let generatedURL = htmlFileURL, let baseURL = htmlBaseURL {
                         WebViewRepresentable(
                             content: WebViewContent(
-                                fileURL: fileURL,
+                                fileURL: generatedURL,
                                 baseURL: baseURL,
                                 scrollFraction: scrollFraction > 0 ? scrollFraction : nil,
                                 fragment: nil,
                                 cssOverride: effective.cssString,
                                 paginated: isPaginated,
                                 twoUp: isPaginated ? ReaderHelpers.resolveTwoUpForBridge(twoUpOverride) : nil,
+                                resourceBaseURL: isMarkdown && renderMarkdown
+                                    ? self.fileURL?.deletingLastPathComponent() : nil,
                                 marginsOneUp: effective.marginsOneUp,
                                 marginsTwoUp: effective.marginsTwoUp
                             ),
@@ -397,21 +403,37 @@ struct TextReaderView: View {
     @ViewBuilder
     private var iOSTopBar: some View {
         HStack {
-            if let onClose {
-                if readAloud.isActive {
+            HStack(spacing: 16) {
+                if sizeClass != .compact {
                     Button {
-                        readAloud.dismiss()
+                        withAnimation { showTOC.toggle() }
                     } label: {
-                        Label("Done", systemImage: "speaker.wave.2.fill")
+                        Label(
+                            showTOC ? "Hide Sidebar" : "Show Sidebar",
+                            systemImage: "sidebar.leading"
+                        )
                     }
-                } else {
-                    Button("Done", action: onClose)
+                    .labelStyle(.iconOnly)
+                }
+
+                if let onClose {
+                    if readAloud.isActive {
+                        Button {
+                            readAloud.dismiss()
+                        } label: {
+                            Label("Done", systemImage: "speaker.wave.2.fill")
+                        }
+                    } else {
+                        Button("Close Book", action: onClose)
+                    }
                 }
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Text(fileURL?.deletingPathExtension().lastPathComponent ?? "")
                 .lineLimit(1)
-            Spacer()
+                .frame(maxWidth: .infinity)
+
             Menu {
                 Section {
                     ViewModeMenuButtons(
@@ -434,8 +456,11 @@ struct TextReaderView: View {
                                   systemImage: effective.reflowText ? "text.justify.leading" : "text.word.spacing")
                         }
                     }
-                    Button { showTOC.toggle() } label: {
-                        Label("Sidebar", systemImage: showTOC ? "sidebar.leading" : "sidebar.left")
+                    Button { withAnimation { showTOC.toggle() } } label: {
+                        Label(
+                            showTOC ? "Hide Sidebar" : "Show Sidebar",
+                            systemImage: "sidebar.leading"
+                        )
                     }
                     Button { toggleBookmark() } label: {
                         Label(isCurrentPositionBookmarked ? "Remove Bookmark" : "Add Bookmark",
@@ -458,6 +483,7 @@ struct TextReaderView: View {
             } label: {
                 Label("Menu", systemImage: "ellipsis.circle")
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .font(.title3)
         .padding(.horizontal)
@@ -793,7 +819,7 @@ struct TextReaderView: View {
         if let existing = bookmarkStore.bookmarkAt(fileHash: hash, position: position) {
             bookmarkStore.removeBookmark(id: existing.id)
         } else {
-            bookmarkStore.addBookmark(position, for: url, data: rawData)
+            bookmarkStore.addBookmark(position, for: url, data: rawData, fileHash: hash)
         }
     }
 
@@ -801,7 +827,7 @@ struct TextReaderView: View {
         guard let url = fileURL else { return }
         guard scrollFraction > 0 else { return }
         let position: ReadingPosition = .textOffset(Int(scrollFraction * 1000))
-        bookmarkStore.savePosition(position, for: url, data: rawData)
+        bookmarkStore.savePosition(position, for: url, data: rawData, fileHash: fileHash)
     }
 
     private func adjustFontSize(by delta: Double) {
@@ -889,10 +915,15 @@ struct TextReaderView: View {
                 + "</p>"
         }
 
+        let baseElement = isMarkdown && renderMarkdown && fileURL != nil
+            ? "<base href=\"epub-local://document/\">" : ""
+
         let html = """
         <!DOCTYPE html>
         <html><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src epub-local: data: https:; font-src epub-local: data:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'">
+        \(baseElement)
         <style>
         body {
             background-color: #ffffff;

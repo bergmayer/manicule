@@ -19,6 +19,9 @@
 		6B795DB28BC5C1DA2FE1E68D /* TextProcessingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BAB47EEDBD8241A926916D7 /* TextProcessingTests.swift */; };
 		8AD0C8D7185EB5BA96376470 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 506139AD1A033D19D7B0CC3A /* Foundation.framework */; };
 		A479CD66F7EDC749C1E2AADD /* ReadingPositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E41D3C4658FCB8D24B7F668 /* ReadingPositionTests.swift */; };
+		A73D11B22C33D44E55F60011 /* PageNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73D11B22C33D44E55F60001 /* PageNavigationTests.swift */; };
+		A73D11B22C33D44E55F60012 /* LocalFileSchemeHandlerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73D11B22C33D44E55F60002 /* LocalFileSchemeHandlerTests.swift */; };
+		A73D11B22C33D44E55F60013 /* EPubWebViewIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73D11B22C33D44E55F60003 /* EPubWebViewIntegrationTests.swift */; };
 		B3D4E5F607182A3B4C5D6E7F /* TestFilesIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* TestFilesIntegrationTests.swift */; };
 		E1CA533237882F0E8A02C47D /* RelocateEventTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A447A41AF71C2B803B61F2C /* RelocateEventTests.swift */; };
 /* End PBXBuildFile section */
@@ -75,6 +78,9 @@
 		78E65922917E96164B83722E /* FileHasherTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileHasherTests.swift; sourceTree = "<group>"; };
 		8BAB47EEDBD8241A926916D7 /* TextProcessingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TextProcessingTests.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B5C /* TestFilesIntegrationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TestFilesIntegrationTests.swift; sourceTree = "<group>"; };
+		A73D11B22C33D44E55F60001 /* PageNavigationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PageNavigationTests.swift; sourceTree = "<group>"; };
+		A73D11B22C33D44E55F60002 /* LocalFileSchemeHandlerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalFileSchemeHandlerTests.swift; sourceTree = "<group>"; };
+		A73D11B22C33D44E55F60003 /* EPubWebViewIntegrationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPubWebViewIntegrationTests.swift; sourceTree = "<group>"; };
 		D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DocumentContentTests.swift; sourceTree = "<group>"; };
 		F401D3A3C8F6802799E4ECF1 /* rædaðTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "rædaðTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -224,7 +230,10 @@
 			isa = PBXGroup;
 			children = (
 				D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */,
+				A73D11B22C33D44E55F60003 /* EPubWebViewIntegrationTests.swift */,
 				78E65922917E96164B83722E /* FileHasherTests.swift */,
+				A73D11B22C33D44E55F60002 /* LocalFileSchemeHandlerTests.swift */,
+				A73D11B22C33D44E55F60001 /* PageNavigationTests.swift */,
 				A1B2C3D4E5F60718293A4B5C /* TestFilesIntegrationTests.swift */,
 				8BAB47EEDBD8241A926916D7 /* TextProcessingTests.swift */,
 			);
@@ -331,7 +340,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2640;
-				LastUpgradeCheck = 2640;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					311F13BB2F4DE7BF007FDDEA = {
 						CreatedOnToolsVersion = 26.4;
@@ -430,7 +439,10 @@
 				A479CD66F7EDC749C1E2AADD /* ReadingPositionTests.swift in Sources */,
 				E1CA533237882F0E8A02C47D /* RelocateEventTests.swift in Sources */,
 				29887A94C3FC924B8136E852 /* DocumentContentTests.swift in Sources */,
+				A73D11B22C33D44E55F60013 /* EPubWebViewIntegrationTests.swift in Sources */,
 				22797AFC8D25F9D60F3E3961 /* FileHasherTests.swift in Sources */,
+				A73D11B22C33D44E55F60012 /* LocalFileSchemeHandlerTests.swift in Sources */,
+				A73D11B22C33D44E55F60011 /* PageNavigationTests.swift in Sources */,
 				6B795DB28BC5C1DA2FE1E68D /* TextProcessingTests.swift in Sources */,
 				B3D4E5F607182A3B4C5D6E7F /* TestFilesIntegrationTests.swift in Sources */,
 			);
@@ -493,6 +505,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -516,6 +529,7 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -555,6 +569,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -571,6 +586,7 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -584,6 +600,7 @@
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "rædað_macOS.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -629,6 +646,7 @@
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "rædað_macOS.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -671,6 +689,7 @@
 				CODE_SIGN_ENTITLEMENTS = "rædað_look/rædað_look.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -707,6 +726,7 @@
 				CODE_SIGN_ENTITLEMENTS = "rædað_look/rædað_look.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -744,6 +764,7 @@
 				CODE_SIGN_ENTITLEMENTS = "rædað_share/rædað_share.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "rædað_share/Info.plist";
@@ -777,6 +798,7 @@
 				CODE_SIGN_ENTITLEMENTS = "rædað_share/rædað_share.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "rædað_share/Info.plist";

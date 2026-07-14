@@ -29,7 +29,8 @@ struct PerBookSettingsView: View {
                 }
             }
 
-            if !bookmarkStore.autoSavedPositions.isEmpty || !bookmarkStore.entries.isEmpty {
+            if !bookmarkStore.autoSavedPositions.isEmpty || !bookmarkStore.entries.isEmpty
+                || !prefs.perBookOverrides.isEmpty {
                 Section {
                     Button(role: .destructive) {
                         showClearAllConfirmation = true
@@ -44,15 +45,16 @@ struct PerBookSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .confirmationDialog("Clear All?", isPresented: $showClearAllConfirmation, titleVisibility: .visible) {
-            Button("Clear All Books and Bookmarks", role: .destructive) {
+            Button("Clear All Book Data", role: .destructive) {
                 bookmarkStore.clearAll()
                 bookmarkStore.clearAllAutoSaved()
                 bookmarkStore.clearAllURLBookmarks()
                 bookmarkStore.clearAllFileProviderRefs()
+                prefs.clearAllOverrides()
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will remove all saved positions, bookmarks, and the Recently Opened list. This cannot be undone.")
+            Text("This will remove all saved positions, bookmarks, custom book settings, and the Recently Opened list. This cannot be undone.")
         }
     }
 

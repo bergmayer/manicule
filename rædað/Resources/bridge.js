@@ -347,35 +347,78 @@ function postToggleChrome() {
 }
 
 // --- Section turn animation (scroll mode chapter navigation) ---
-// Lock prevents rapid-fire navigation that causes "stuck" on short chapters.
+// All navigation is serialized. Input is intentionally queued rather than
+// discarded: a reader who presses next three times should advance three pages,
+// even when the first page is still loading or animating.
+let navigationQueue = Promise.resolve()
+let queuedNavigationCount = 0
+let navigationInProgress = false
 let sectionTurnInProgress = false
+let pageTurnAnimationInProgress = false
 
-async function commitSectionTurn(direction) {
-    if (sectionTurnInProgress) return
+function enqueueNavigation(operation, label = 'navigation') {
+    queuedNavigationCount++
+    const run = async () => {
+        queuedNavigationCount--
+        navigationInProgress = true
+        try {
+            return await operation()
+        } catch (e) {
+            console.error(`${label} failed:`, e)
+        } finally {
+            navigationInProgress = false
+        }
+    }
+    navigationQueue = navigationQueue.then(run, run)
+    return navigationQueue
+}
+
+function turnPage(direction, userInitiated = true) {
+    if (userInitiated && readAloudActive)
+        readAloudUserFlipUntil = Date.now() + 500
+    return enqueueNavigation(
+        () => direction > 0 ? view.next() : view.prev(),
+        direction > 0 ? 'next page' : 'previous page')
+}
+
+function turnVisualDirection(direction) {
+    if (readAloudActive) readAloudUserFlipUntil = Date.now() + 500
+    return enqueueNavigation(
+        () => direction > 0 ? view.goRight() : view.goLeft(),
+        direction > 0 ? 'right page' : 'left page')
+}
+
+async function performSectionTurn(direction) {
     sectionTurnInProgress = true
     const w = window.innerWidth
-
-    // 1. Slide current content off-screen
-    view.style.transition = 'transform 200ms ease-out'
-    view.style.transform = `translateX(${direction > 0 ? -w : w}px)`
-    await new Promise(r => setTimeout(r, 210))
-    view.style.transition = ''
-
-    // 2. Load new section while off-screen (user sees blank/background)
     try {
+        // 1. Slide current content off-screen
+        view.style.transition = 'transform 200ms ease-out'
+        view.style.transform = `translateX(${direction > 0 ? -w : w}px)`
+        await new Promise(r => setTimeout(r, 210))
+        view.style.transition = ''
+
+        // 2. Load new section while off-screen (user sees blank/background)
         if (direction > 0) await view.renderer?.nextSection()
         else await view.renderer?.prevSection()
-    } catch (e) { /* ignore */ }
 
-    // 3. Position at opposite edge so new content slides in
-    view.style.transform = `translateX(${direction > 0 ? w : -w}px)`
-    void view.offsetWidth  // force reflow before transition
-    view.style.transition = 'transform 200ms ease-out'
-    view.style.transform = ''
-    await new Promise(r => setTimeout(r, 210))
-    view.style.transition = ''
+        // 3. Position at opposite edge so new content slides in
+        view.style.transform = `translateX(${direction > 0 ? w : -w}px)`
+        void view.offsetWidth  // force reflow before transition
+        view.style.transition = 'transform 200ms ease-out'
+        view.style.transform = ''
+        await new Promise(r => setTimeout(r, 210))
+    } finally {
+        view.style.transition = ''
+        view.style.transform = ''
+        sectionTurnInProgress = false
+    }
+}
 
-    sectionTurnInProgress = false
+function commitSectionTurn(direction) {
+    return enqueueNavigation(
+        () => performSectionTurn(direction),
+        direction > 0 ? 'next section' : 'previous section')
 }
 
 function cancelSectionTurn() {
@@ -396,8 +439,7 @@ view.addEventListener('load', ({ detail: { doc } }) => {
         } else if (x >= w / 3 && x <= w * 2 / 3) {
             postToggleChrome()
         } else if (currentFlow === 'paginated') {
-            if (x < w / 3) view.prev()
-            else view.next()
+            turnPage(x < w / 3 ? -1 : 1)
         } else {
             // Scroll mode: left/right taps navigate chapters with slide animation
             commitSectionTurn(x < w / 3 ? -1 : 1)
@@ -444,8 +486,7 @@ view.addEventListener('load', ({ detail: { doc } }) => {
         } else if (x >= w / 3 && x <= w * 2 / 3) {
             postToggleChrome()
         } else if (currentFlow === 'paginated') {
-            if (x < w / 3) view.prev()
-            else view.next()
+            turnPage(x < w / 3 ? -1 : 1)
         } else {
             commitSectionTurn(x < w / 3 ? -1 : 1)
         }
@@ -485,22 +526,22 @@ function handleKeydown(e) {
     if (currentFlow === 'paginated') {
         if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
             e.preventDefault()
-            view.goRight()
+            turnVisualDirection(1)
         } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
             e.preventDefault()
-            view.goLeft()
+            turnVisualDirection(-1)
         } else if (e.key === ' ' && !e.shiftKey) {
             e.preventDefault()
-            view.next()
+            turnPage(1)
         } else if (e.key === ' ' && e.shiftKey) {
             e.preventDefault()
-            view.prev()
+            turnPage(-1)
         } else if (e.key === 'Home') {
             e.preventDefault()
-            view.renderer.firstSection()
+            enqueueNavigation(() => view.renderer.firstSection(), 'first section')
         } else if (e.key === 'End') {
             e.preventDefault()
-            view.renderer.lastSection()
+            enqueueNavigation(() => view.renderer.lastSection(), 'last section')
         }
     } else {
         // Scroll mode: left/right arrows navigate chapters with animation
@@ -512,10 +553,12 @@ function handleKeydown(e) {
             commitSectionTurn(-1)
         } else if (e.key === 'Home') {
             e.preventDefault()
-            view.renderer?.firstSection()
+            if (view.renderer) enqueueNavigation(
+                () => view.renderer.firstSection(), 'first section')
         } else if (e.key === 'End') {
             e.preventDefault()
-            view.renderer?.lastSection()
+            if (view.renderer) enqueueNavigation(
+                () => view.renderer.lastSection(), 'last section')
         }
     }
 }
@@ -602,8 +645,7 @@ function addWheelHandler(target) {
         wheelAccum += delta
         if (Math.abs(wheelAccum) > 15) {
             wheelTriggered = true
-            if (wheelAccum > 0) view.next()
-            else view.prev()
+            turnPage(wheelAccum > 0 ? 1 : -1)
         }
     }, { passive: false })
 }
@@ -699,7 +741,7 @@ function buildTextNodeMap(doc) {
 
     readAloudText = text
     readAloudTextNodeMap = map
-    post({ type: 'error', message: 'readAloud: extracted ' + text.length + ' chars, ' + map.length + ' nodes from section' })
+    console.debug('readAloud: extracted', text.length, 'chars from', map.length, 'nodes')
 }
 
 function injectReadAloudStyle(doc) {
@@ -938,7 +980,7 @@ function checkReadAloudPageAdvance(charOffset) {
             const visibleRight = -iframeRect.left + window.innerWidth
             if (rect.left > visibleRight) {
                 readAloudAutoAdvanceUntil = Date.now() + 1000
-                view.next()
+                turnPage(1, false)
             }
         }
     } catch (e) { /* ignore */ }
@@ -977,11 +1019,11 @@ function scrollToReadAloudOffset(offset) {
             if (rect.left >= visibleRight) {
                 // Target is ahead — advance pages until visible
                 readAloudAutoAdvanceUntil = Date.now() + 1000
-                view.next()
+                turnPage(1, false)
             } else if (rect.right <= visibleLeft) {
                 // Target is behind — go back pages until visible
                 readAloudAutoAdvanceUntil = Date.now() + 1000
-                view.prev()
+                turnPage(-1, false)
             }
         } else {
             // Scroll mode: scroll the iframe content so the target is visible
@@ -1016,6 +1058,7 @@ window.bridge = {
         } catch (e) {
             console.error('bridge.open failed:', e)
             post({ type: 'error', message: 'open: ' + (e.message ?? String(e)) })
+            throw e
         }
     },
 
@@ -1030,28 +1073,31 @@ window.bridge = {
         } catch (e) {
             console.error('bridge.init failed:', e)
             post({ type: 'error', message: 'init: ' + (e.message ?? String(e)) })
+            throw e
         }
     },
 
     next() {
-        view.next()
+        return turnPage(1)
     },
 
     prev() {
-        view.prev()
+        return turnPage(-1)
     },
 
     nextSection() {
-        if (view.renderer) view.renderer.nextSection()
+        if (view.renderer) return enqueueNavigation(
+            () => view.renderer.nextSection(), 'next section')
     },
 
     prevSection() {
-        if (view.renderer) view.renderer.prevSection()
+        if (view.renderer) return enqueueNavigation(
+            () => view.renderer.prevSection(), 'previous section')
     },
 
     async goTo(target) {
         try {
-            await view.goTo(target)
+            await enqueueNavigation(() => view.goTo(target), 'go to location')
         } catch (e) {
             console.error('goTo failed:', e)
         }
@@ -1059,7 +1105,7 @@ window.bridge = {
 
     async goToFraction(f) {
         try {
-            await view.goToFraction(f)
+            await enqueueNavigation(() => view.goToFraction(f), 'go to fraction')
         } catch (e) {
             console.error('goToFraction failed:', e)
         }
@@ -1183,7 +1229,7 @@ window.bridge = {
 
     async goToSearchResult(cfi) {
         try {
-            await view.goTo(cfi)
+            await enqueueNavigation(() => view.goTo(cfi), 'go to search result')
         } catch (e) {
             console.error('goToSearchResult failed:', e)
         }
@@ -1191,7 +1237,8 @@ window.bridge = {
 
     // Trackpad finger-tracking: apply a visual offset during pan gesture
     setPageOffset(px) {
-        if (sectionTurnInProgress) return
+        if (navigationInProgress || sectionTurnInProgress
+            || pageTurnAnimationInProgress || queuedNavigationCount > 0) return
         view.style.transform = `translateX(${px}px)`
     },
 
@@ -1199,27 +1246,33 @@ window.bridge = {
     // In scroll mode, delegates to animated section turn.
     commitPageTurn(direction) {
         if (currentFlow !== 'paginated') {
-            if (sectionTurnInProgress) {
-                cancelSectionTurn()
-            } else {
-                commitSectionTurn(direction)
-            }
-            return
+            return commitSectionTurn(direction)
         }
-        const w = window.innerWidth
-        view.style.transition = 'transform 200ms ease-out'
-        view.style.transform = `translateX(${direction > 0 ? -w : w}px)`
-        setTimeout(() => {
-            view.style.transition = ''
-            view.style.transform = ''
-            if (direction > 0) view.next()
-            else view.prev()
-        }, 210)
+        if (readAloudActive) readAloudUserFlipUntil = Date.now() + 500
+        return enqueueNavigation(async () => {
+            pageTurnAnimationInProgress = true
+            const w = window.innerWidth
+            try {
+                view.style.transition = 'transform 200ms ease-out'
+                view.style.transform = `translateX(${direction > 0 ? -w : w}px)`
+                await new Promise(r => setTimeout(r, 210))
+                view.style.transition = ''
+                view.style.transform = ''
+                if (direction > 0) await view.next()
+                else await view.prev()
+            } finally {
+                view.style.transition = ''
+                view.style.transform = ''
+                pageTurnAnimationInProgress = false
+            }
+        }, direction > 0 ? 'animated next page' : 'animated previous page')
     },
 
     // Cancel the page/section turn — snap back to original position
     cancelPageTurn() {
+        if (pageTurnAnimationInProgress) return
         if (currentFlow !== 'paginated') {
+            if (sectionTurnInProgress) return
             cancelSectionTurn()
             return
         }
@@ -1283,7 +1336,8 @@ window.bridge = {
     advanceReadAloudSection() {
         if (!readAloudActive) return
         readAloudAutoAdvanceUntil = Date.now() + 1000
-        if (view.renderer) view.renderer.nextSection()
+        if (view.renderer) return enqueueNavigation(
+            () => view.renderer.nextSection(), 'read-aloud section advance')
     },
 
     scrollToReadAloudOffset(offset) {

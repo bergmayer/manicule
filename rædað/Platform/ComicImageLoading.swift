@@ -29,16 +29,40 @@ nonisolated func loadComicThumbnail(at url: URL, maxPixelSize: Int) -> CGImage? 
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
 }
 
+/// Loads a page as a CGImage, optionally downsampling before decode and
+/// applying the cached normalized trim rectangle. Returning Core Graphics
+/// keeps disk I/O and decode work safe for detached tasks on every platform.
+nonisolated func loadComicPageCGImage(
+    at url: URL,
+    trim: Bool,
+    maxPixelSize: Int? = nil
+) -> CGImage? {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    let image: CGImage?
+    if let maxPixelSize {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    } else {
+        image = CGImageSourceCreateImageAtIndex(
+            source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+    }
+    guard let image else { return nil }
+    return trim ? ContentTrimmer.shared.trimmed(image, key: url.path) : image
+}
+
 #if canImport(UIKit)
 /// Loads a comic page from disk, optionally trimming whitespace borders.
 /// The trim result is cached by the file's full path — comics extract into
 /// per-archive UUID directories, so paths stay unique even when page
 /// filenames (e.g. "001.jpg") repeat across different books.
 nonisolated func loadComicImage(at url: URL, trim: Bool) -> UIImage? {
-    guard let image = UIImage(contentsOfFile: url.path) else { return nil }
-    guard trim, let cgImage = image.cgImage else { return image }
-    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.path)
-    return UIImage(cgImage: trimmed, scale: image.scale, orientation: image.imageOrientation)
+    guard let image = loadComicPageCGImage(at: url, trim: trim) else { return nil }
+    return UIImage(cgImage: image)
 }
 #endif
 
@@ -48,10 +72,8 @@ nonisolated func loadComicImage(at url: URL, trim: Bool) -> UIImage? {
 /// per-archive UUID directories, so paths stay unique even when page
 /// filenames (e.g. "001.jpg") repeat across different books.
 nonisolated func loadComicImage(at url: URL, trim: Bool) -> NSImage? {
-    guard let image = NSImage(contentsOf: url) else { return nil }
-    guard trim, let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
-    let trimmed = ContentTrimmer.shared.trimmed(cgImage, key: url.path)
-    return NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
+    guard let image = loadComicPageCGImage(at: url, trim: trim) else { return nil }
+    return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
 }
 
 /// NSImageView with a flipped coordinate system, used inside scroll views

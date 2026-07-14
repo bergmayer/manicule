@@ -11,13 +11,13 @@ struct ComicReaderView: View {
 
     private let fileHash: String?
 
-    init(archive: ComicArchive, fileURL: URL?, rawData: Data, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
+    init(archive: ComicArchive, fileURL: URL?, rawData: Data, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
         self.archive = archive
         self.fileURL = fileURL
         self.rawData = rawData
         self._showChrome = showChrome
         self.onClose = onClose
-        self.fileHash = FileHasher.hash(data: rawData)
+        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
     }
 
     @State private var currentPage: Int = 0
@@ -63,6 +63,7 @@ struct ComicReaderView: View {
     var body: some View {
         comicLayoutWithNotifications
             .task {
+                ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
@@ -73,8 +74,18 @@ struct ComicReaderView: View {
             .onDisappear {
                 autoSavePosition()
             }
-            .onChange(of: currentPage) { _, _ in
+            .onChange(of: currentPage) { _, newPage in
+                let normalized = PageNavigation.normalizedStart(
+                    current: newPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp)
+                if normalized != newPage {
+                    currentPage = normalized
+                    return
+                }
                 autoSavePosition()
+            }
+            .onChange(of: effectiveTwoUp) { _, isTwoUp in
+                currentPage = PageNavigation.normalizedStart(
+                    current: currentPage, pageCount: archive.pageCount, twoUp: isTwoUp)
             }
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
@@ -240,7 +251,7 @@ struct ComicReaderView: View {
             if showThumbnails {
                 Button("Done") { showThumbnails = false }
             } else if let onClose {
-                Button("Done", action: onClose)
+                Button("Close Book", action: onClose)
             }
             Spacer()
             Text(fileURL?.deletingPathExtension().lastPathComponent ?? "")
@@ -290,7 +301,11 @@ struct ComicReaderView: View {
     #endif
 
     private var displayedComicPage: Int {
-        sliderDragging ? sliderPageIndex : currentPage
+        PageNavigation.normalizedStart(
+            current: sliderDragging ? sliderPageIndex : currentPage,
+            pageCount: archive.pageCount,
+            twoUp: effectiveTwoUp
+        )
     }
 
     @ViewBuilder
@@ -499,26 +514,15 @@ struct ComicReaderView: View {
         return bookmarkStore.isPositionBookmarked(fileHash: hash, position: .comicPage(currentPage))
     }
 
-    /// Number of pages to step when navigating in two-up mode.
-    private var pageStep: Int {
-        effectiveTwoUp ? 2 : 1
-    }
-
     private var pageLabel: String {
         ReaderHelpers.pageLabel(current: currentPage, total: archive.pageCount, twoUp: effectiveTwoUp)
     }
 
     private func previousPage(animated: Bool = false) {
         zoomScale = 1.0
-        let step = pageStep
-        let newPage: Int
-        if currentPage - step >= 0 {
-            newPage = currentPage - step
-        } else if currentPage != 0 {
-            newPage = 0
-        } else {
-            return
-        }
+        let newPage = PageNavigation.previous(
+            current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp)
+        guard newPage != currentPage else { return }
         navigatingForward = false
         if animated {
             withAnimation(.easeOut(duration: 0.25)) { currentPage = newPage }
@@ -529,9 +533,9 @@ struct ComicReaderView: View {
 
     private func nextPage(animated: Bool = false) {
         zoomScale = 1.0
-        let step = pageStep
-        guard currentPage + step < archive.pageCount else { return }
-        let newPage = currentPage + step
+        let newPage = PageNavigation.next(
+            current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp)
+        guard newPage != currentPage else { return }
         navigatingForward = true
         if animated {
             withAnimation(.easeOut(duration: 0.25)) { currentPage = newPage }
@@ -559,7 +563,7 @@ struct ComicReaderView: View {
         guard let url = fileURL else { return }
         guard currentPage > 0 else { return }
         let position: ReadingPosition = .comicPage(currentPage)
-        bookmarkStore.savePosition(position, for: url, data: rawData)
+        bookmarkStore.savePosition(position, for: url, data: rawData, fileHash: fileHash)
     }
 
     // MARK: - Search (OCR)
@@ -643,6 +647,8 @@ struct ComicReaderView: View {
     private func selectTwoPage() {
         viewMode = .paginated
         twoUpOverride = true
+        currentPage = PageNavigation.normalizedStart(
+            current: currentPage, pageCount: archive.pageCount, twoUp: true)
         readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
@@ -668,12 +674,14 @@ struct ComicReaderView: View {
             Button(action: { previousPage() }) {
                 Label("Previous Page", systemImage: "chevron.left")
             }
-            .disabled(currentPage <= 0)
+            .disabled(!PageNavigation.canGoPrevious(
+                current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp))
 
             Button(action: { nextPage() }) {
                 Label("Next Page", systemImage: "chevron.right")
             }
-            .disabled(currentPage + pageStep >= archive.pageCount)
+            .disabled(!PageNavigation.canGoNext(
+                current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp))
         }
 
         ToolbarItem(placement: .automatic) {
@@ -765,13 +773,23 @@ private struct ComicPageView: View {
     private func loadImageAsync() async -> NSImage? {
         let url = imageURL
         let trim = trimWhitespace
-        return await Task.detached { loadComicImage(at: url, trim: trim) }.value
+        return await Task.detached {
+            guard let image = loadComicPageCGImage(
+                at: url, trim: trim, maxPixelSize: 4_096) else { return nil }
+            return NSImage(
+                cgImage: image,
+                size: NSSize(width: image.width, height: image.height)
+            )
+        }.value
     }
     #else
     private func loadImageAsync() async -> UIImage? {
         let url = imageURL
         let trim = trimWhitespace
-        return await Task.detached { loadComicImage(at: url, trim: trim) }.value
+        return await Task.detached {
+            loadComicPageCGImage(at: url, trim: trim, maxPixelSize: 4_096)
+                .map(UIImage.init(cgImage:))
+        }.value
     }
     #endif
 }
@@ -894,4 +912,3 @@ private struct ComicPageThumbnail: View {
     }
     #endif
 }
-

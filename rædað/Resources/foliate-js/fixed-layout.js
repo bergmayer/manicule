@@ -43,6 +43,7 @@ export class FixedLayout extends HTMLElement {
     #center
     #side
     #zoom
+    #navigationQueue = Promise.resolve()
     constructor() {
         super()
 
@@ -86,19 +87,44 @@ export class FixedLayout extends HTMLElement {
         iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts')
         iframe.setAttribute('scrolling', 'no')
         iframe.setAttribute('part', 'filter')
+        element.style.visibility = 'hidden'
         this.#root.append(element)
         if (!src) return { blank: true, element, iframe }
-        return new Promise(resolve => {
+        return new Promise((resolve, reject) => {
+            let settled = false
+            const timeout = setTimeout(() => {
+                if (settled) return
+                settled = true
+                element.remove()
+                reject(new Error(`Timed out loading fixed-layout section ${index}`))
+            }, 15_000)
+            iframe.addEventListener('error', () => {
+                if (settled) return
+                settled = true
+                clearTimeout(timeout)
+                element.remove()
+                reject(new Error(`Failed to load fixed-layout section ${index}`))
+            }, { once: true })
             iframe.addEventListener('load', () => {
-                const doc = iframe.contentDocument
-                this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
-                const { width, height } = getViewport(doc, this.defaultViewport)
-                resolve({
-                    element, iframe,
-                    width: parseFloat(width),
-                    height: parseFloat(height),
-                    onZoom,
-                })
+                if (settled) return
+                try {
+                    const doc = iframe.contentDocument
+                    this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
+                    const { width, height } = getViewport(doc, this.defaultViewport)
+                    settled = true
+                    clearTimeout(timeout)
+                    resolve({
+                        element, iframe,
+                        width: parseFloat(width),
+                        height: parseFloat(height),
+                        onZoom,
+                    })
+                } catch (e) {
+                    settled = true
+                    clearTimeout(timeout)
+                    element.remove()
+                    reject(e)
+                }
             }, { once: true })
             iframe.src = src
         })
@@ -164,21 +190,44 @@ export class FixedLayout extends HTMLElement {
         }
     }
     async #showSpread({ left, right, center, side }) {
-        this.#root.replaceChildren()
-        this.#left = null
-        this.#right = null
-        this.#center = null
-        if (center) {
-            this.#center = await this.#createFrame(center)
-            this.#side = 'center'
+        const created = []
+        try {
+            if (center) {
+                const nextCenter = await this.#createFrame(center)
+                created.push(nextCenter)
+                this.#root.replaceChildren(nextCenter.element)
+                nextCenter.element.style.visibility = ''
+                this.#left = null
+                this.#right = null
+                this.#center = nextCenter
+                this.#side = 'center'
+            } else {
+                const nextLeft = await this.#createFrame(left)
+                created.push(nextLeft)
+                const nextRight = await this.#createFrame(right)
+                created.push(nextRight)
+                this.#root.replaceChildren(nextLeft.element, nextRight.element)
+                nextLeft.element.style.visibility = ''
+                nextRight.element.style.visibility = ''
+                this.#left = nextLeft
+                this.#right = nextRight
+                this.#center = null
+                this.#side = nextLeft.blank ? 'right'
+                    : nextRight.blank ? 'left' : side
+            }
             this.#render()
-        } else {
-            this.#left = await this.#createFrame(left)
-            this.#right = await this.#createFrame(right)
-            this.#side = this.#left.blank ? 'right'
-                : this.#right.blank ? 'left' : side
-            this.#render()
+        } catch (e) {
+            for (const frame of created) frame.element?.remove()
+            throw e
         }
+    }
+
+    #enqueueNavigation(operation) {
+        const result = this.#navigationQueue.then(operation, operation)
+        // Keep the internal chain usable after a malformed or missing section,
+        // while returning the original rejection to the caller.
+        this.#navigationQueue = result.catch(() => {})
+        return result
     }
     #goLeft() {
         if (this.#center || this.#left?.blank) return
@@ -262,13 +311,12 @@ export class FixedLayout extends HTMLElement {
             if (center === section) return { index, side: 'center' }
         }
     }
-    async goToSpread(index, side, reason) {
+    async #goToSpread(index, side, reason) {
         if (index < 0 || index > this.#spreads.length - 1) return
         if (index === this.#index) {
             this.#render(side)
             return
         }
-        this.#index = index
         const spread = this.#spreads[index]
         if (spread.center) {
             const index = this.book.sections.indexOf(spread.center)
@@ -283,7 +331,13 @@ export class FixedLayout extends HTMLElement {
             const right = { index: indexR, src: srcR }
             await this.#showSpread({ left, right, side })
         }
+        // Do not expose a new logical position until all of its frames have
+        // loaded and replaced the old spread successfully.
+        this.#index = index
         this.#reportLocation(reason)
+    }
+    goToSpread(index, side, reason) {
+        return this.#enqueueNavigation(() => this.#goToSpread(index, side, reason))
     }
     async select(target) {
         await this.goTo(target)
@@ -298,12 +352,18 @@ export class FixedLayout extends HTMLElement {
         await this.goToSpread(index, side)
     }
     async next() {
-        const s = this.rtl ? this.#goLeft() : this.#goRight()
-        if (!s) return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
+        return this.#enqueueNavigation(async () => {
+            const s = this.rtl ? this.#goLeft() : this.#goRight()
+            if (!s) await this.#goToSpread(
+                this.#index + 1, this.rtl ? 'right' : 'left', 'page')
+        })
     }
     async prev() {
-        const s = this.rtl ? this.#goRight() : this.#goLeft()
-        if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
+        return this.#enqueueNavigation(async () => {
+            const s = this.rtl ? this.#goRight() : this.#goLeft()
+            if (!s) await this.#goToSpread(
+                this.#index - 1, this.rtl ? 'left' : 'right', 'page')
+        })
     }
     getContents() {
         return Array.from(this.#root.querySelectorAll('iframe'), frame => ({

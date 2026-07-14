@@ -58,6 +58,27 @@ final class DocumentContentTests: XCTestCase {
         }
     }
 
+    func testParseWindows1252TextDoesNotBecomeBlank() throws {
+        let data = Data([0x43, 0x61, 0x66, 0xE9]) // Café in Windows-1252/Latin-1
+        let content = try DocumentContent.parse(
+            data: data, contentType: .plainText, filename: "cafe.txt")
+        guard case .plainText(let parsed) = content else {
+            return XCTFail("Expected plain text")
+        }
+        XCTAssertEqual(parsed, "Café")
+    }
+
+    func testUTF16TextWithoutBOMUsesNullByteHeuristic() throws {
+        let expected = "Hello"
+        let data = expected.data(using: .utf16LittleEndian)!
+        let content = try DocumentContent.parse(
+            data: data, contentType: .plainText, filename: "utf16.txt")
+        guard case .plainText(let parsed) = content else {
+            return XCTFail("Expected plain text")
+        }
+        XCTAssertEqual(parsed, expected)
+    }
+
     // MARK: - Markdown Detection
 
     func testParseMarkdownByExtension() throws {
@@ -118,6 +139,49 @@ final class DocumentContentTests: XCTestCase {
         }
     }
 
+    func testNestedNCXPreservesEachNavPointsOwnTitleAndSource() throws {
+        let book = try EPubParser.parse(data: Self.epubWithNestedNCX())
+        let parent = try XCTUnwrap(book.tableOfContents.first)
+        XCTAssertEqual(parent.title, "Parent")
+        XCTAssertEqual(parent.href, "OEBPS/parent.xhtml")
+        let child = try XCTUnwrap(parent.children.first)
+        XCTAssertEqual(child.title, "Child")
+        XCTAssertEqual(child.href, "OEBPS/child.xhtml")
+    }
+
+    func testEPubRejectsContainerOPFTraversal() throws {
+        let archive = try Archive(accessMode: .create)
+        try Self.addTextEntry(to: archive, path: "META-INF/container.xml", content: """
+        <?xml version="1.0"?>
+        <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="../../etc/passwd"/></rootfiles>
+        </container>
+        """)
+        let data = try XCTUnwrap(archive.data)
+        XCTAssertThrowsError(try EPubParser.parse(data: data))
+    }
+
+    func testZipExtractorSkipsTraversalEntry() throws {
+        let archive = try Archive(accessMode: .create)
+        let escapedName = "raedad-escape-\(UUID().uuidString).txt"
+        try Self.addTextEntry(to: archive, path: "../\(escapedName)", content: "nope")
+        let extraction = try ZipExtractor.extract(data: try XCTUnwrap(archive.data))
+        defer { try? FileManager.default.removeItem(at: extraction) }
+        let escaped = extraction.deletingLastPathComponent().appendingPathComponent(escapedName)
+        defer { try? FileManager.default.removeItem(at: escaped) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: escaped.path))
+    }
+
+    func testEPubExtractionIsRemovedWhenBookIsReleased() throws {
+        let directory = try Self.makeAndReleaseEPub()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testComicExtractionIsRemovedWhenArchiveIsReleased() throws {
+        let directory = try Self.makeAndReleaseComic()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
     // MARK: - CBZ Detection
 
     func testParseCBZByExtension() throws {
@@ -163,8 +227,8 @@ final class DocumentContentTests: XCTestCase {
     }()
 
     /// Creates a minimal valid ePub (ZIP with container.xml, content.opf, and one XHTML chapter).
-    private static func minimalEPub() throws -> Data {
-        let archive = Archive(accessMode: .create)!
+    static func minimalEPub() throws -> Data {
+        let archive = try Archive(accessMode: .create)
 
         try archive.addEntry(with: "mimetype",
                              type: .file,
@@ -213,13 +277,63 @@ final class DocumentContentTests: XCTestCase {
 
     /// Creates a minimal CBZ (ZIP containing one small PNG).
     private static func minimalCBZ() throws -> Data {
-        let archive = Archive(accessMode: .create)!
+        let archive = try Archive(accessMode: .create)
         let png = Self.onePxPNG
         try archive.addEntry(with: "page001.png",
                              type: .file,
                              uncompressedSize: Int64(png.count),
                              provider: { position, size in png })
         return archive.data!
+    }
+
+    private static func epubWithNestedNCX() throws -> Data {
+        let archive = try Archive(accessMode: .create)
+        try addTextEntry(to: archive, path: "mimetype", content: "application/epub+zip")
+        try addTextEntry(to: archive, path: "META-INF/container.xml", content: """
+        <?xml version="1.0"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """)
+        try addTextEntry(to: archive, path: "OEBPS/content.opf", content: """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>NCX Test</dc:title></metadata>
+          <manifest>
+            <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+            <item id="parent" href="parent.xhtml" media-type="application/xhtml+xml"/>
+            <item id="child" href="child.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine toc="ncx"><itemref idref="parent"/><itemref idref="child"/></spine>
+        </package>
+        """)
+        try addTextEntry(to: archive, path: "OEBPS/toc.ncx", content: """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+          <navMap>
+            <navPoint id="parent"><navLabel><text>Parent</text></navLabel><content src="parent.xhtml"/>
+              <navPoint id="child"><navLabel><text>Child</text></navLabel><content src="child.xhtml"/></navPoint>
+            </navPoint>
+          </navMap>
+        </ncx>
+        """)
+        try addTextEntry(to: archive, path: "OEBPS/parent.xhtml", content: "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>Parent</body></html>")
+        try addTextEntry(to: archive, path: "OEBPS/child.xhtml", content: "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>Child</body></html>")
+        return try XCTUnwrap(archive.data)
+    }
+
+    private static func makeAndReleaseEPub() throws -> URL {
+        let book = try EPubParser.parse(data: minimalEPub())
+        let directory = book.extractionDirectory
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        return directory
+    }
+
+    private static func makeAndReleaseComic() throws -> URL {
+        let comic = try ComicArchiveParser.parse(data: minimalCBZ())
+        let directory = comic.extractionDirectory
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        return directory
     }
 
     private static func addTextEntry(to archive: Archive, path: String, content: String) throws {

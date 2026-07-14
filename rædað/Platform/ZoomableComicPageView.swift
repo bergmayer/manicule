@@ -97,11 +97,35 @@ struct ZoomableComicPageView: NSViewRepresentable {
     }
 
     private func loadImage(into imageView: NSImageView, scrollView: NSScrollView, context: Context) {
-        imageView.image = loadComicImage(at: imageURL, trim: trimWhitespace)
+        let coordinator = context.coordinator
+        coordinator.imageLoadTask?.cancel()
+        imageView.image = nil
         imageView.frame = CGRect(origin: .zero, size: viewSize)
         scrollView.magnification = CGFloat(zoomScale)
-        context.coordinator.currentURL = imageURL
-        context.coordinator.currentTrim = trimWhitespace
+        coordinator.currentURL = imageURL
+        coordinator.currentTrim = trimWhitespace
+
+        let url = imageURL
+        let trim = trimWhitespace
+        let scale = scrollView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let displayDimension = max(viewSize.width, viewSize.height)
+        let maxPixelSize = displayDimension > 0
+            ? min(8_192, max(2_048, Int(displayDimension * scale * 2.5)))
+            : 4_096
+        coordinator.imageLoadTask = Task { [weak coordinator, weak imageView] in
+            let image = await Task.detached(priority: .userInitiated) {
+                loadComicPageCGImage(at: url, trim: trim, maxPixelSize: maxPixelSize)
+            }.value
+            guard !Task.isCancelled,
+                  let coordinator,
+                  coordinator.currentURL == url,
+                  coordinator.currentTrim == trim,
+                  let image else { return }
+            imageView?.image = NSImage(
+                cgImage: image,
+                size: NSSize(width: image.width, height: image.height)
+            )
+        }
     }
 
     class Coordinator: NSObject {
@@ -113,6 +137,7 @@ struct ZoomableComicPageView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         var currentURL: URL?
         var currentTrim: Bool?
+        var imageLoadTask: Task<Void, Never>?
         private var pendingSingleClick: DispatchWorkItem?
         var accumulatedScrollDelta: CGFloat = 0
         var scrollTriggered = false
@@ -188,6 +213,7 @@ struct ZoomableComicPageView: NSViewRepresentable {
         }
 
         deinit {
+            imageLoadTask?.cancel()
             NotificationCenter.default.removeObserver(self)
         }
     }

@@ -73,6 +73,10 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
 
     private var scrollView: UIScrollView!
     private var contentView: UIView!
+    private var primaryImageView: UIImageView!
+    private var secondaryImageView: UIImageView?
+    private var imageLoadTask: Task<Void, Never>?
+    private var didStartImageLoad = false
 
     init(primaryImageURL: URL, secondaryImageURL: URL?, pageIndex: Int, trimWhitespace: Bool = false) {
         self.primaryImageURL = primaryImageURL
@@ -110,16 +114,17 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
         contentView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.addSubview(contentView)
 
-        // Build image stack
-        let primaryImage = loadComicImage(at: primaryImageURL, trim: trimWhitespace)
-        let primaryImageView = UIImageView(image: primaryImage)
+        // Build an empty image stack immediately. Image I/O, decoding, and
+        // optional Vision trimming happen off the main actor after layout gives
+        // us an appropriate downsampling size.
+        primaryImageView = UIImageView()
         primaryImageView.contentMode = .scaleAspectFit
         primaryImageView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(primaryImageView)
 
-        if let secondaryURL = secondaryImageURL {
-            let secondaryImage = loadComicImage(at: secondaryURL, trim: trimWhitespace)
-            let secondaryImageView = UIImageView(image: secondaryImage)
+        if secondaryImageURL != nil {
+            let secondaryImageView = UIImageView()
+            self.secondaryImageView = secondaryImageView
             secondaryImageView.contentMode = .scaleAspectFit
             secondaryImageView.translatesAutoresizingMaskIntoConstraints = false
             contentView.addSubview(secondaryImageView)
@@ -168,6 +173,39 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
         // (fixes black screen when UIPageViewController initially has zero frame)
         scrollView.setNeedsLayout()
         scrollView.layoutIfNeeded()
+        startImageLoadIfNeeded()
+    }
+
+    private func startImageLoadIfNeeded() {
+        guard !didStartImageLoad, view.bounds.width > 0, view.bounds.height > 0 else { return }
+        didStartImageLoad = true
+        let primaryURL = primaryImageURL
+        let secondaryURL = secondaryImageURL
+        let trim = trimWhitespace
+        let displayPixels = max(view.bounds.width, view.bounds.height)
+            * view.traitCollection.displayScale
+        // Preserve useful pinch-zoom detail without decoding arbitrarily large
+        // source bitmaps. 8192 also bounds a worst-case page near 256 MiB RGBA.
+        let maxPixelSize = min(8_192, max(2_048, Int(displayPixels * 2.5)))
+
+        imageLoadTask = Task { [weak self] in
+            let images = await Task.detached(priority: .userInitiated) {
+                (
+                    loadComicPageCGImage(
+                        at: primaryURL, trim: trim, maxPixelSize: maxPixelSize),
+                    secondaryURL.flatMap {
+                        loadComicPageCGImage(at: $0, trim: trim, maxPixelSize: maxPixelSize)
+                    }
+                )
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            if let primary = images.0 { self.primaryImageView.image = UIImage(cgImage: primary) }
+            if let secondary = images.1 { self.secondaryImageView?.image = UIImage(cgImage: secondary) }
+        }
+    }
+
+    deinit {
+        imageLoadTask?.cancel()
     }
 
 

@@ -9,11 +9,8 @@ protocol PaginatedPageVC: UIViewController {
     var pageIndex: Int { get }
 }
 
-/// Generic `UIPageViewController` wrapper used by the iOS PDF and Comic readers.
-/// Both share UIPageViewController setup, tap zones, trackpad pan, and the
-/// programmatic-navigation dance — only the per-page view controller class
-/// and a few cosmetic settings differ. The caller supplies a factory closure
-/// that builds the right page VC for an index.
+/// Generic `UIPageViewController` wrapper used by the iOS comic reader. The
+/// caller supplies a factory closure that builds the page VC for an index.
 ///
 /// `layoutKey` is an opaque hash that, when changed, forces the displayed
 /// page to be re-built (e.g. flipping single-page ↔ two-up, toggling trim,

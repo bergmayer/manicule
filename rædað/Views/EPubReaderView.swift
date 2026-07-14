@@ -18,13 +18,13 @@ struct EPubReaderView: View {
 
     private let fileHash: String?
 
-    init(book: EPubBook, fileURL: URL?, rawData: Data, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
+    init(book: EPubBook, fileURL: URL?, rawData: Data, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
         self.book = book
         self.fileURL = fileURL
         self.rawData = rawData
         self._showChrome = showChrome
         self.onClose = onClose
-        self.fileHash = FileHasher.hash(data: rawData)
+        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
     }
 
     // Navigation state from foliate-js relocate events
@@ -48,7 +48,7 @@ struct EPubReaderView: View {
     @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
-    @State private var bookReady = false
+    @State private var bookTempURL: URL?
 
     @State private var fastScroll = FastScrollController()
 
@@ -72,12 +72,6 @@ struct EPubReaderView: View {
 
     private var isPaginated: Bool {
         viewMode == .paginated
-    }
-
-    /// Stable temp file URL derived from the file hash. Written to disk in `.task`.
-    private var bookTempURL: URL {
-        let hash = fileHash ?? "unknown"
-        return FileManager.default.temporaryDirectory.appendingPathComponent("raedad-\(hash).epub")
     }
 
     private var effectiveTwoUp: Bool {
@@ -131,23 +125,45 @@ struct EPubReaderView: View {
             .toolbar { epubToolbar }
             #endif
             .fullScreenToolbarAutoHide(showChrome: $showChrome)
-            .onChange(of: showTOC) { _, _ in
-                webViewProxy.refocus?()
+            .onChange(of: showTOC) { _, isShowing in
+                guard !isShowing else { return }
+                Task { @MainActor in
+                    // Let the sidebar transition and the activating tap finish
+                    // before returning keyboard focus to the reader.
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard !showTOC else { return }
+                    webViewProxy.refocus?()
+                }
             }
             .task {
+                ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
                 let eff = readingPrefs.effective(for: fileHash)
                 viewMode = eff.viewMode
                 twoUpOverride = eff.twoUp
                 wireFastScrollAnimationSuppression()
-                let tempFile = bookTempURL
-                if !FileManager.default.fileExists(atPath: tempFile.path) {
-                    try? rawData.write(to: tempFile)
-                }
-                bookReady = true
+                let bookData = rawData
+                bookTempURL = await Task.detached(priority: .utility) {
+                    let directory = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("raedad-epub-session-\(UUID().uuidString)")
+                    let file = directory.appendingPathComponent("book.epub")
+                    do {
+                        try FileManager.default.createDirectory(
+                            at: directory, withIntermediateDirectories: true)
+                        try bookData.write(to: file, options: .atomic)
+                        return file
+                    } catch {
+                        try? FileManager.default.removeItem(at: directory)
+                        return nil
+                    }
+                }.value
             }
             .onDisappear {
                 autoSavePosition()
+                if let directory = bookTempURL?.deletingLastPathComponent() {
+                    try? FileManager.default.removeItem(at: directory)
+                }
+                bookTempURL = nil
                 #if os(iOS) || os(visionOS)
                 if readAloud.isActive { readAloud.dismiss() }
                 #endif
@@ -186,35 +202,48 @@ struct EPubReaderView: View {
     @ViewBuilder
     private var epubLayout: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                if showTOC && sizeClass != .compact {
-                    TableOfContentsView(
-                        entries: book.tableOfContents,
-                        currentTOCLabel: currentTOCLabel,
-                        bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash ?? "").compactMap(\.tocLabel)),
-                        onSelect: { entry in
-                            navigateToTOCEntry(entry)
-                        }
-                    )
-                    .frame(width: 280)
-                    .overlay(alignment: .trailing) {
-                        // Invisible edge handle for swipe-to-close
-                        Color.clear
-                            .frame(width: 30)
-                            .contentShape(Rectangle())
-                            .gesture(DragGesture(minimumDistance: 20)
-                                .onEnded { value in
-                                    if value.translation.width < -40 {
-                                        withAnimation { showTOC = false }
-                                    }
-                                }
-                            )
-                    }
-                    .transition(.move(edge: .leading))
-                    Divider()
-                }
+            ZStack(alignment: .leading) {
                 epubContent
                     .trackViewportSize(width: $viewWidth, height: $viewHeight)
+
+                if showTOC && sizeClass != .compact {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation { showTOC = false }
+                        }
+
+                    HStack(spacing: 0) {
+                        TableOfContentsView(
+                            entries: book.tableOfContents,
+                            currentTOCLabel: currentTOCLabel,
+                            bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash ?? "").compactMap(\.tocLabel)),
+                            onSelect: { entry in
+                                navigateToTOCEntry(entry)
+                            }
+                        )
+                        .frame(width: 280)
+                        .overlay(alignment: .trailing) {
+                            // Invisible edge handle for swipe-to-close
+                            Color.clear
+                                .frame(width: 30)
+                                .contentShape(Rectangle())
+                                .gesture(DragGesture(minimumDistance: 20)
+                                    .onEnded { value in
+                                        if value.translation.width < -40 {
+                                            withAnimation { showTOC = false }
+                                        }
+                                    }
+                                )
+                        }
+                        Divider()
+                    }
+                    .frame(maxHeight: .infinity)
+                    .background(.bar)
+                    .shadow(color: .black.opacity(0.18), radius: 8, x: 2)
+                    .transition(.move(edge: .leading))
+                    .zIndex(1)
+                }
             }
         }
         .navigationTitle(book.metadata.title)
@@ -315,7 +344,7 @@ struct EPubReaderView: View {
 
     @ViewBuilder
     private var epubContent: some View {
-        if bookReady {
+        if let bookTempURL {
             WebViewRepresentable(
                 content: WebViewContent(
                     fileURL: URL(fileURLWithPath: "/"),
@@ -447,23 +476,39 @@ struct EPubReaderView: View {
     @ViewBuilder
     private var iOSTopBar: some View {
         HStack {
-            if let onClose {
-                if readAloud.isActive {
+            HStack(spacing: 16) {
+                if !book.tableOfContents.isEmpty && sizeClass != .compact {
                     Button {
-                        // Full teardown — also exits the bridge's read-aloud
-                        // mode, not just the controller.
-                        dismissReadAloud()
+                        withAnimation { showTOC.toggle() }
                     } label: {
-                        Label("Done", systemImage: "speaker.wave.2.fill")
+                        Label(
+                            showTOC ? "Hide Table of Contents" : "Show Table of Contents",
+                            systemImage: "sidebar.leading"
+                        )
                     }
-                } else {
-                    Button("Done", action: onClose)
+                    .labelStyle(.iconOnly)
+                }
+
+                if let onClose {
+                    if readAloud.isActive {
+                        Button {
+                            // Full teardown — also exits the bridge's read-aloud
+                            // mode, not just the controller.
+                            dismissReadAloud()
+                        } label: {
+                            Label("Done", systemImage: "speaker.wave.2.fill")
+                        }
+                    } else {
+                        Button("Close Book", action: onClose)
+                    }
                 }
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Text(book.metadata.title)
                 .lineLimit(1)
-            Spacer()
+                .frame(maxWidth: .infinity)
+
             Menu {
                 Section {
                     ViewModeMenuButtons(
@@ -476,7 +521,10 @@ struct EPubReaderView: View {
                 Section {
                     if !book.tableOfContents.isEmpty {
                         Button { withAnimation { showTOC.toggle() } } label: {
-                            Label("Table of Contents", systemImage: showTOC ? "list.bullet.indent" : "list.bullet")
+                            Label(
+                                showTOC ? "Hide Table of Contents" : "Show Table of Contents",
+                                systemImage: "sidebar.leading"
+                            )
                         }
                     }
                     Button { toggleBookmark() } label: {
@@ -506,6 +554,7 @@ struct EPubReaderView: View {
             } label: {
                 Label("Menu", systemImage: "ellipsis.circle")
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .font(.title3)
         .padding(.horizontal)
@@ -640,7 +689,10 @@ struct EPubReaderView: View {
         let cfi = currentCFI ?? ""
         guard !cfi.isEmpty || currentFraction > 0 else { return }
         let position: ReadingPosition = .epubCFI(cfi, fraction: currentFraction)
-        bookmarkStore.savePosition(position, for: url, data: rawData, tocLabel: currentTOCLabel)
+        bookmarkStore.savePosition(
+            position, for: url, data: rawData,
+            tocLabel: currentTOCLabel, fileHash: fileHash
+        )
     }
 
     // MARK: - Search

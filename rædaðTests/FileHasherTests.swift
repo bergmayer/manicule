@@ -21,13 +21,21 @@ final class FileHasherTests: XCTestCase {
         XCTAssertEqual(hash.count, 32)
     }
 
-    func testHashUsesPrefix() {
-        // Two data blobs that share the first 64KB but differ after should hash the same
+    func testHashUsesCompleteFile() {
+        // Documents with identical headers but different bodies must not share
+        // bookmarks, settings, or reading positions.
         var base = Data(repeating: 0xAA, count: 65_536)
         let hashA = FileHasher.hash(data: base)
         base.append(Data(repeating: 0xBB, count: 1000))
         let hashB = FileHasher.hash(data: base)
-        XCTAssertEqual(hashA, hashB)
+        XCTAssertNotEqual(hashA, hashB)
+    }
+
+    func testLegacyHashStillUsesPrefixForMigration() {
+        var base = Data(repeating: 0xAA, count: 65_536)
+        let hashA = FileHasher.legacyHash(data: base)
+        base.append(Data(repeating: 0xBB, count: 1000))
+        XCTAssertEqual(hashA, FileHasher.legacyHash(data: base))
     }
 
     func testHashSmallData() {

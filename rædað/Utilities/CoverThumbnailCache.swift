@@ -87,6 +87,30 @@ final class CoverThumbnailCache: Sendable {
         NSUbiquitousKeyValueStore.default.removeObject(forKey: Self.iCloudCoverPrefix + fileHash)
     }
 
+    /// Moves a cached cover from a legacy content identifier to its full-data
+    /// identifier without regenerating the thumbnail.
+    func migrateCover(from legacyHash: String, to fileHash: String) {
+        guard legacyHash != fileHash else { return }
+        let oldPath = jpegPath(for: legacyHash)
+        let newPath = jpegPath(for: fileHash)
+        if FileManager.default.fileExists(atPath: oldPath.path) {
+            if !FileManager.default.fileExists(atPath: newPath.path) {
+                try? FileManager.default.moveItem(at: oldPath, to: newPath)
+            } else {
+                try? FileManager.default.removeItem(at: oldPath)
+            }
+        }
+
+        let store = NSUbiquitousKeyValueStore.default
+        let oldKey = Self.iCloudCoverPrefix + legacyHash
+        let newKey = Self.iCloudCoverPrefix + fileHash
+        if store.data(forKey: newKey) == nil, let data = store.data(forKey: oldKey) {
+            store.set(data, forKey: newKey)
+        }
+        store.removeObject(forKey: oldKey)
+        store.synchronize()
+    }
+
     private nonisolated func jpegPath(for fileHash: String) -> URL {
         cacheDir.appendingPathComponent("\(fileHash).jpg")
     }
@@ -95,16 +119,30 @@ final class CoverThumbnailCache: Sendable {
 
     /// Push a cover thumbnail to iCloud KV store (small JPEG for cross-device sync).
     private nonisolated static func pushToiCloud(cgImage: CGImage, fileHash: String, syncDim: CGFloat) {
-        // Re-encode the CGImage as JPEG data at lower quality for sync
-        let mutableData = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(mutableData, UTType.jpeg.identifier as CFString, 1, nil) else { return }
-        CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.5] as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return }
-        let jpegData = mutableData as Data
+        guard let syncImage = resized(cgImage, maxDimension: syncDim) else { return }
+        var jpegData: Data?
+        for quality in [0.55, 0.42, 0.3] {
+            let mutableData = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(
+                mutableData, UTType.jpeg.identifier as CFString, 1, nil
+            ) else { return }
+            CGImageDestinationAddImage(
+                dest,
+                syncImage,
+                [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+            )
+            guard CGImageDestinationFinalize(dest) else { continue }
+            let candidate = mutableData as Data
+            if candidate.count < 12_000 {
+                jpegData = candidate
+                break
+            }
+        }
 
-        // Only sync if under 60KB (iCloud KV per-key limit is 64KB)
-        guard jpegData.count < 60_000 else {
-            logger.info("Cover too large for iCloud sync: \(jpegData.count) bytes")
+        // Keeping each of at most 60 covers below 12 KiB also respects the
+        // iCloud KVS store-wide quota, not merely its per-key limit.
+        guard let jpegData else {
+            logger.info("Cover could not be reduced enough for iCloud sync")
             return
         }
 
@@ -117,11 +155,10 @@ final class CoverThumbnailCache: Sendable {
     private func pushCoverToiCloudIfNeeded(fileHash: String) {
         let key = Self.iCloudCoverPrefix + fileHash
         guard NSUbiquitousKeyValueStore.default.data(forKey: key) == nil else { return }
-        // Read from local cache and push
         let path = jpegPath(for: fileHash)
-        guard let data = try? Data(contentsOf: path), data.count < 60_000 else { return }
-        NSUbiquitousKeyValueStore.default.set(data, forKey: key)
-        NSUbiquitousKeyValueStore.default.synchronize()
+        guard let source = CGImageSourceCreateWithURL(path as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+        Self.pushToiCloud(cgImage: image, fileHash: fileHash, syncDim: syncDim)
     }
 
     /// Pull all cover thumbnails from iCloud KV store into the local cache.
@@ -233,5 +270,26 @@ final class CoverThumbnailCache: Sendable {
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
         CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.75] as CFDictionary)
         CGImageDestinationFinalize(dest)
+    }
+
+    private nonisolated static func resized(_ image: CGImage, maxDimension: CGFloat) -> CGImage? {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        let scale = min(1, maxDimension / max(width, height))
+        let targetWidth = max(1, Int((width * scale).rounded()))
+        let targetHeight = max(1, Int((height * scale).rounded()))
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: nil,
+                width: targetWidth,
+                height: targetHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        return context.makeImage()
     }
 }

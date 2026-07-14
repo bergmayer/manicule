@@ -10,10 +10,23 @@ enum ZipExtractor: Sendable {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("raedad-epub-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        var completed = false
+        defer {
+            if !completed { try? FileManager.default.removeItem(at: tempDir) }
+        }
 
         let archive = try Archive(data: data, accessMode: .read)
+        var entryCount = 0
+        var totalUncompressedSize: UInt64 = 0
 
         for entry in archive {
+            entryCount += 1
+            guard entryCount <= 100_000,
+                  entry.uncompressedSize <= 1_073_741_824,
+                  totalUncompressedSize <= 4_294_967_296 - entry.uncompressedSize else {
+                throw DocumentError.zipExtractionFailed
+            }
+            totalUncompressedSize += entry.uncompressedSize
             let destinationURL = tempDir.appendingPathComponent(entry.path).standardized
             guard destinationURL.path.hasPrefix(tempDir.path + "/") else { continue }
             // Skip directory entries — createDirectory handles them
@@ -24,12 +37,15 @@ enum ZipExtractor: Sendable {
                 )
                 continue
             }
+            // Symlinks can redirect later entries outside the extraction root.
+            guard entry.type == .file else { continue }
             // Ensure parent directory exists
             let parentDir = destinationURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
             _ = try archive.extract(entry, to: destinationURL)
         }
 
+        completed = true
         return tempDir
     }
 
@@ -46,9 +62,4 @@ enum ZipExtractor: Sendable {
         return images.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
 
-    /// Extracts images from a ZIP archive (for CBZ comics).
-    /// Returns sorted image file URLs.
-    nonisolated static func extractImages(data: Data) throws -> [URL] {
-        imageFiles(under: try extract(data: data))
-    }
 }

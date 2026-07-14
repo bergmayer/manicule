@@ -312,14 +312,37 @@ export class View extends HTMLElement {
     async init({ lastLocation, showTextStart }) {
         const resolved = lastLocation ? this.resolveNavigation(lastLocation) : null
         if (resolved) {
-            await this.renderer.goTo(resolved)
-            this.history.pushState(lastLocation)
+            try {
+                await this.renderer.goTo(resolved)
+                if (this.renderer.getContents().length) {
+                    this.history.pushState(lastLocation)
+                    return
+                }
+            } catch (e) {
+                console.warn('Could not restore saved reading position', e)
+            }
         }
-        else if (showTextStart) await this.goToTextStart()
+
+        // A stale but syntactically valid CFI can resolve outside the current
+        // spine. Foliate previously treated that as success without creating a
+        // content frame, so the book reopened permanently blank. A requested
+        // restore must always fall back to a real section.
+        if (showTextStart || lastLocation) await this.goToTextStart()
         else {
             this.history.pushState(0)
             await this.next()
         }
+
+        // Broken landmarks are common in older EPUBs. If the semantic text
+        // start did not render anything, load the first linear spine item by
+        // index instead of leaving an empty renderer.
+        if (!this.renderer.getContents().length) {
+            const firstLinear = this.book.sections.findIndex(s => s.linear !== 'no')
+            const index = firstLinear >= 0 ? firstLinear : 0
+            await this.renderer.goTo({ index })
+        }
+        if (!this.renderer.getContents().length)
+            throw new Error('EPUB contains no renderable spine section')
     }
     #emit(name, detail, cancelable) {
         return this.dispatchEvent(new CustomEvent(name, { detail, cancelable }))

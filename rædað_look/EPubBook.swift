@@ -3,11 +3,29 @@ import Foundation
 /// Represents a fully parsed ePub document ready for rendering.
 struct EPubBook: Sendable {
     let extractionDirectory: URL
+    private let extractionLease: TemporaryDirectoryLease
     let metadata: Metadata
     let manifest: [String: ManifestItem]   // id → item
     let spine: [SpineItem]                 // ordered reading list
     let tableOfContents: [TOCEntry]
     let coverMetaID: String?               // from <meta name="cover" content="...">
+
+    nonisolated init(
+        extractionLease: TemporaryDirectoryLease,
+        metadata: Metadata,
+        manifest: [String: ManifestItem],
+        spine: [SpineItem],
+        tableOfContents: [TOCEntry],
+        coverMetaID: String?
+    ) {
+        self.extractionLease = extractionLease
+        self.extractionDirectory = extractionLease.url
+        self.metadata = metadata
+        self.manifest = manifest
+        self.spine = spine
+        self.tableOfContents = tableOfContents
+        self.coverMetaID = coverMetaID
+    }
 
     struct Metadata: Sendable {
         let title: String

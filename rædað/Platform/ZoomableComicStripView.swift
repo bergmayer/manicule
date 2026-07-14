@@ -90,6 +90,7 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
             c.trimWhitespace = trimWhitespace
             // Loaded images were decoded with the old trim setting — drop them
             // so the visible window reloads with the new one.
+            c.cancelImageLoads()
             c.imageViews.forEach { $0.image = nil }
             c.loadVisibleImages()
         }
@@ -135,6 +136,7 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
         var imageViews: [UIImageView] = []
         var pageOffsets: [CGFloat] = []
         var lastTrackedPage: Int = 0
+        var imageLoadTasks: [Int: Task<Void, Never>] = [:]
 
         init(currentPage: Binding<Int>, zoomScale: Binding<Double>, trimWhitespace: Bool, onTap: @escaping () -> Void) {
             self.currentPage = currentPage
@@ -147,6 +149,7 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
             guard let container = containerView else { return }
             layoutWidth = width
 
+            cancelImageLoads()
             container.subviews.forEach { $0.removeFromSuperview() }
             imageViews.removeAll()
             pageOffsets.removeAll()
@@ -220,13 +223,40 @@ private struct ZoomableComicStripView_iOS: UIViewRepresentable {
                 let top = iv.frame.minY
                 let bottom = iv.frame.maxY
                 if bottom >= visibleY - buffer && top <= visibleY + visibleH + buffer {
-                    if iv.image == nil {
-                        iv.image = loadComicImage(at: pages[i], trim: trimWhitespace)
+                    if iv.image == nil, imageLoadTasks[i] == nil, pages.indices.contains(i) {
+                        let url = pages[i]
+                        let trim = trimWhitespace
+                        let pixelSize = min(8_192, max(
+                            1_024,
+                            Int(max(iv.bounds.width, iv.bounds.height)
+                                * sv.traitCollection.displayScale * 2.5)
+                        ))
+                        imageLoadTasks[i] = Task { [weak self, weak iv] in
+                            let image = await Task.detached(priority: .utility) {
+                                loadComicPageCGImage(
+                                    at: url, trim: trim, maxPixelSize: pixelSize)
+                            }.value
+                            guard !Task.isCancelled, let self else { return }
+                            self.imageLoadTasks[i] = nil
+                            guard self.imageViews.indices.contains(i), self.imageViews[i] === iv,
+                                  let image else { return }
+                            iv?.image = UIImage(cgImage: image)
+                        }
                     }
                 } else {
+                    imageLoadTasks.removeValue(forKey: i)?.cancel()
                     iv.image = nil
                 }
             }
+        }
+
+        func cancelImageLoads() {
+            for task in imageLoadTasks.values { task.cancel() }
+            imageLoadTasks.removeAll()
+        }
+
+        deinit {
+            cancelImageLoads()
         }
 
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
@@ -337,6 +367,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
             c.trimWhitespace = trimWhitespace
             // Loaded images were decoded with the old trim setting — drop them
             // so the visible window reloads with the new one.
+            c.cancelImageLoads()
             c.imageViews.forEach { $0.image = nil }
             c.loadVisibleImages()
         }
@@ -384,6 +415,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
         var pageOffsets: [CGFloat] = []
         var lastTrackedPage: Int = 0
         private var pendingSingleClick: DispatchWorkItem?
+        private var imageLoadTasks: [Int: Task<Void, Never>] = [:]
 
         init(currentPage: Binding<Int>, zoomScale: Binding<Double>, trimWhitespace: Bool, onTap: @escaping () -> Void) {
             self.currentPage = currentPage
@@ -396,6 +428,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
             guard let container = containerView else { return }
             layoutWidth = width
 
+            cancelImageLoads()
             container.subviews.forEach { $0.removeFromSuperview() }
             imageViews.removeAll()
             pageOffsets.removeAll()
@@ -435,13 +468,39 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
 
             for (i, iv) in imageViews.enumerated() {
                 if iv.frame.maxY >= visible.minY - buffer && iv.frame.minY <= visible.maxY + buffer {
-                    if iv.image == nil {
-                        iv.image = loadComicImage(at: pages[i], trim: trimWhitespace)
+                    if iv.image == nil, imageLoadTasks[i] == nil, pages.indices.contains(i) {
+                        let url = pages[i]
+                        let trim = trimWhitespace
+                        let scale = sv.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+                        let pixelSize = min(8_192, max(
+                            1_024,
+                            Int(max(iv.bounds.width, iv.bounds.height) * scale * 2.5)
+                        ))
+                        imageLoadTasks[i] = Task { [weak self, weak iv] in
+                            let image = await Task.detached(priority: .utility) {
+                                loadComicPageCGImage(
+                                    at: url, trim: trim, maxPixelSize: pixelSize)
+                            }.value
+                            guard !Task.isCancelled, let self else { return }
+                            self.imageLoadTasks[i] = nil
+                            guard self.imageViews.indices.contains(i), self.imageViews[i] === iv,
+                                  let image else { return }
+                            iv?.image = NSImage(
+                                cgImage: image,
+                                size: NSSize(width: image.width, height: image.height)
+                            )
+                        }
                     }
                 } else {
+                    imageLoadTasks.removeValue(forKey: i)?.cancel()
                     iv.image = nil
                 }
             }
+        }
+
+        func cancelImageLoads() {
+            for task in imageLoadTasks.values { task.cancel() }
+            imageLoadTasks.removeAll()
         }
 
         @objc func magnificationDidChange(_ note: Notification) {
@@ -495,6 +554,7 @@ private struct ZoomableComicStripView_macOS: NSViewRepresentable {
         }
 
         deinit {
+            cancelImageLoads()
             NotificationCenter.default.removeObserver(self)
         }
     }

@@ -75,11 +75,13 @@ struct ReaderDocument: FileDocument {
 
     let content: DocumentContent
     let rawData: Data
+    let fileHash: String
 
     /// Direct initializer for manual document construction (e.g. from security-scoped file access).
-    init(content: DocumentContent, rawData: Data) {
+    init(content: DocumentContent, rawData: Data, fileHash: String? = nil) {
         self.content = content
         self.rawData = rawData
+        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
     }
 
     nonisolated init(configuration: ReadConfiguration) throws {
@@ -95,6 +97,7 @@ struct ReaderDocument: FileDocument {
         }
         docLog.info("ReaderDocument.init: data size=\(data.count) bytes")
         self.rawData = data
+        self.fileHash = FileHasher.hash(data: data)
         let parsed = try DocumentContent.parse(
             data: data,
             contentType: ct,

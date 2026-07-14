@@ -14,6 +14,7 @@ final class BookmarkStore {
 
     private(set) var entries: [BookmarkEntry] = []
     private(set) var autoSavedPositions: [AutoSavedPosition] = []
+    private(set) var lastError: String?
 
     private static let iCloudKey = "raedad.bookmarks"
     private static let autoSaveKey = "raedad.autoSavedPositions"
@@ -73,6 +74,51 @@ final class BookmarkStore {
 
     // MARK: - Public API
 
+    /// Rekeys state created by the former 64 KiB-prefix hash. This is
+    /// idempotent and intentionally runs only when a document is opened.
+    func migrateIdentity(from legacyHash: String, to fileHash: String) {
+        guard legacyHash != fileHash else { return }
+
+        var bookmarksChanged = false
+        for index in entries.indices where entries[index].fileHash == legacyHash {
+            entries[index].fileHash = fileHash
+            bookmarksChanged = true
+        }
+        if bookmarksChanged { persist() }
+
+        if let legacy = autoSavedPositions.first(where: { $0.id == legacyHash }) {
+            autoSavedPositions.removeAll { $0.id == legacyHash }
+            if let index = autoSavedPositions.firstIndex(where: { $0.id == fileHash }) {
+                if legacy.lastOpened > autoSavedPositions[index].lastOpened {
+                    var migrated = legacy
+                    migrated.id = fileHash
+                    autoSavedPositions[index] = migrated
+                }
+            } else {
+                var migrated = legacy
+                migrated.id = fileHash
+                autoSavedPositions.append(migrated)
+            }
+            persistAutoSaved()
+        }
+
+        if urlBookmarks[fileHash] == nil, let value = urlBookmarks[legacyHash] {
+            urlBookmarks[fileHash] = value
+        }
+        if urlBookmarks.removeValue(forKey: legacyHash) != nil { persistURLBookmarks() }
+
+        if fileProviderRefs[fileHash] == nil, let value = fileProviderRefs[legacyHash] {
+            fileProviderRefs[fileHash] = value
+        }
+        if fileProviderRefs.removeValue(forKey: legacyHash) != nil { persistFileProviderRefs() }
+
+        if sessionRefreshedPaths[fileHash] == nil {
+            sessionRefreshedPaths[fileHash] = sessionRefreshedPaths[legacyHash]
+        }
+        sessionRefreshedPaths.removeValue(forKey: legacyHash)
+        CoverThumbnailCache.shared.migrateCover(from: legacyHash, to: fileHash)
+    }
+
     /// All bookmarks for a specific book, sorted by creation date (newest first).
     func bookmarks(for fileHash: String) -> [BookmarkEntry] {
         entries.filter { $0.fileHash == fileHash }.sorted { $0.lastOpened > $1.lastOpened }
@@ -80,9 +126,18 @@ final class BookmarkStore {
 
     /// Add a bookmark (up to 12 per book). Returns the new entry, or nil if at limit.
     @discardableResult
-    func addBookmark(_ position: ReadingPosition, for fileURL: URL, data: Data, tocLabel: String? = nil) -> BookmarkEntry? {
-        let hash = FileHasher.hash(data: data)
-        guard bookmarkCount(for: hash) < Self.maxBookmarksPerBook else { return nil }
+    func addBookmark(
+        _ position: ReadingPosition,
+        for fileURL: URL,
+        data: Data,
+        tocLabel: String? = nil,
+        fileHash: String? = nil
+    ) -> BookmarkEntry? {
+        let hash = fileHash ?? FileHasher.hash(data: data)
+        guard bookmarkCount(for: hash) < Self.maxBookmarksPerBook else {
+            lastError = "This book already has the maximum of \(Self.maxBookmarksPerBook) bookmarks. Remove one before adding another."
+            return nil
+        }
 
         let entry = BookmarkEntry(
             fileHash: hash,
@@ -92,14 +147,18 @@ final class BookmarkStore {
             tocLabel: tocLabel
         )
         entries.append(entry)
+        lastError = nil
         persist()
+        refreshPinnedStatus(for: hash)
         return entry
     }
 
     /// Remove a specific bookmark by its unique ID.
     func removeBookmark(id: String) {
+        let affectedHash = entries.first(where: { $0.id == id })?.fileHash
         entries.removeAll { $0.id == id }
         persist()
+        if let affectedHash { refreshPinnedStatus(for: affectedHash) }
     }
 
     /// Check if a specific position is bookmarked.
@@ -123,8 +182,10 @@ final class BookmarkStore {
     }
 
     func clearAll() {
+        let hashes = Set(entries.map(\.fileHash))
         entries.removeAll()
         persist()
+        for hash in hashes { refreshPinnedStatus(for: hash) }
     }
 
     func clearAllAutoSaved() {
@@ -142,8 +203,14 @@ final class BookmarkStore {
     /// Save or update the reading position for a book. Manages the recent stack and pinned limits.
     /// Returns an error message if the pinned limit is exceeded; nil on success.
     @discardableResult
-    func savePosition(_ position: ReadingPosition, for fileURL: URL, data: Data, tocLabel: String? = nil) -> String? {
-        let hash = FileHasher.hash(data: data)
+    func savePosition(
+        _ position: ReadingPosition,
+        for fileURL: URL,
+        data: Data,
+        tocLabel: String? = nil,
+        fileHash: String? = nil
+    ) -> String? {
+        let hash = fileHash ?? FileHasher.hash(data: data)
         let fileName = fileURL.lastPathComponent
         let isPinned = hasBookmarks(for: hash) || ReadingPreferences.shared.hasOverride(for: hash)
 
@@ -162,7 +229,9 @@ final class BookmarkStore {
             if isPinned {
                 let pinnedCount = autoSavedPositions.filter(\.pinned).count
                 if pinnedCount >= Self.maxPinnedBooks {
-                    return "You have \(Self.maxPinnedBooks) books with custom settings or bookmarks. Please remove some before opening new books."
+                    let message = "You have \(Self.maxPinnedBooks) books with custom settings or bookmarks. Please remove some before opening new books."
+                    lastError = message
+                    return message
                 }
             }
             let entry = AutoSavedPosition(
@@ -174,6 +243,7 @@ final class BookmarkStore {
         }
 
         evictOldRecentBooks()
+        lastError = nil
         persistAutoSaved()
 
         if sessionRefreshedPaths[hash] != fileURL.path {
@@ -192,6 +262,10 @@ final class BookmarkStore {
         }
 
         return nil
+    }
+
+    func clearLastError() {
+        lastError = nil
     }
 
     /// Get the auto-saved position for a book.

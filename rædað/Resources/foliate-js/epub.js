@@ -108,6 +108,62 @@ const resolveURL = (url, relativeTo) => {
 
 const isExternal = uri => /^(?!blob)\w+:/i.test(uri)
 
+// Publications are data, not applications. EPUB permits scripted content,
+// but executing publisher JavaScript inside a privileged reader creates an
+// unnecessary trust boundary and allows network activity. Keep declarative
+// HTML/SVG/CSS while removing executable and navigation-capable content.
+const sanitizePublicationDocument = doc => {
+    for (const el of doc.querySelectorAll('script, iframe, frame, object, embed, base'))
+        el.remove()
+
+    for (const meta of doc.querySelectorAll('meta')) {
+        const directive = meta.getAttribute('http-equiv')?.toLowerCase()
+        if (directive === 'refresh' || directive === 'content-security-policy')
+            meta.remove()
+    }
+
+    const URL_ATTRIBUTES = new Set([
+        'href', 'src', 'action', 'formaction', 'poster', 'data', 'xlink:href',
+    ])
+    const ACTIVE_URL = /^\s*(?:javascript|vbscript|data\s*:\s*text\/html)/i
+    const ACTIVE_STYLE = /(?:expression\s*\(|url\s*\(\s*['"]?\s*javascript\s*:)/i
+
+    for (const el of doc.querySelectorAll('*')) {
+        for (const attr of [...el.attributes]) {
+            const name = attr.name.toLowerCase()
+            if (name.startsWith('on')
+                || URL_ATTRIBUTES.has(name) && ACTIVE_URL.test(attr.value)
+                || name === 'style' && ACTIVE_STYLE.test(attr.value))
+                el.removeAttributeNode(attr)
+        }
+    }
+
+    // CSP is defense in depth for any active construct the DOM sanitizer does
+    // not know about. Resources have already been replaced with blob URLs.
+    if (doc.documentElement?.localName.toLowerCase() !== 'svg') {
+        const head = doc.querySelector('head')
+        if (head) {
+            const ns = head.namespaceURI
+            const meta = ns ? doc.createElementNS(ns, 'meta') : doc.createElement('meta')
+            meta.setAttribute('http-equiv', 'Content-Security-Policy')
+            meta.setAttribute('content', [
+                "default-src 'none'",
+                "script-src 'none'",
+                "style-src 'unsafe-inline' blob:",
+                'img-src blob: data:',
+                'font-src blob: data:',
+                'media-src blob: data:',
+                "connect-src 'none'",
+                "object-src 'none'",
+                "frame-src 'none'",
+                "form-action 'none'",
+                "base-uri 'none'",
+            ].join('; '))
+            head.prepend(meta)
+        }
+    }
+}
+
 // like `path.relative()` in Node.js
 const pathRelative = (from, to) => {
     if (!from) return to
@@ -783,7 +839,12 @@ class Loader {
         return this.createURL(href, tryLoadBlob, mediaType, parent)
     }
     async loadHref(href, base, parents = []) {
-        if (isExternal(href)) return href
+        // Publication resources are offline data. Do not allow images, style
+        // sheets, fonts, media, or imports to turn opening a book into a
+        // network request. Ordinary <a href> links are not processed here and
+        // remain available to the reader's external-link handler.
+        if (/^data:(?:image|audio|video|font)\//i.test(href)) return href
+        if (isExternal(href)) return 'about:blank'
         const path = resolveURL(href, base)
         const item = this.manifest.find(item => item.href === path)
         if (!item) return href
@@ -819,6 +880,7 @@ class Loader {
                 item.mediaType = MIME.HTML
                 doc = new DOMParser().parseFromString(str, item.mediaType)
             }
+            sanitizePublicationDocument(doc)
             // replace hrefs in XML processing instructions
             // this is mainly for SVGs that use xml-stylesheet
             if ([MIME.XHTML, MIME.SVG].includes(item.mediaType)) {
@@ -842,9 +904,12 @@ class Loader {
             for (const el of doc.querySelectorAll('[src]')) await replace(el, 'src')
             for (const el of doc.querySelectorAll('[poster]')) await replace(el, 'poster')
             for (const el of doc.querySelectorAll('object[data]')) await replace(el, 'data')
-            for (const el of doc.querySelectorAll('[*|href]:not([href])'))
-                el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
-                    el.getAttributeNS(NS.XLINK, 'href'), href, parents))
+            for (const el of doc.querySelectorAll('[*|href]:not([href])')) {
+                const value = el.getAttributeNS(NS.XLINK, 'href')
+                if (el.localName !== 'a' || !isExternal(value))
+                    el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
+                        value, href, parents))
+            }
             for (const el of doc.querySelectorAll('[srcset]'))
                 el.setAttribute('srcset', await replaceSeries(el.getAttribute('srcset'),
                     /(\s*)(.+?)\s*((?:\s[\d.]+[wx])+\s*(?:,|$)|,\s+|$)/g,
@@ -857,7 +922,6 @@ class Loader {
             for (const el of doc.querySelectorAll('[style]'))
                 el.setAttribute('style',
                     await this.replaceCSS(el.getAttribute('style'), href, parents))
-            // TODO: replace inline scripts? probably not worth the trouble
             const result = new XMLSerializer().serializeToString(doc)
             return this.createURL(href, result, item.mediaType, parent)
         }

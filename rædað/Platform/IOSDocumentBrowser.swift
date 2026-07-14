@@ -26,6 +26,8 @@ struct IOSRootView: View {
     @State private var showError: Bool = false
     @State private var showFilePicker: Bool = false
     @State private var showSettings: Bool = false
+    @State private var isOpening: Bool = false
+    @State private var activeOpenRequestID: UUID?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -56,7 +58,7 @@ struct IOSRootView: View {
                        let urlParam = components.queryItems?.first(where: { $0.name == "url" })?.value,
                        let fileURL = URL(string: urlParam) {
                         clearPendingSharedFile()
-                        openDocument(at: fileURL)
+                        beginOpeningDocument(at: fileURL)
                         return
                     }
                     let filename = components.queryItems?.first(where: { $0.name == "file" })?.value ?? ""
@@ -67,7 +69,7 @@ struct IOSRootView: View {
                     )
                 }
             } else if url.isFileURL {
-                openDocument(at: url)
+                beginOpeningDocument(at: url)
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -88,7 +90,7 @@ struct IOSRootView: View {
                 onOpen: { url in
                     pickerDirectoryURL = nil
                     pickerFileName = nil
-                    openDocument(at: url)
+                    beginOpeningDocument(at: url)
                 }
             )
         }
@@ -96,11 +98,22 @@ struct IOSRootView: View {
             LocateFilePickerView(
                 directoryURL: nil,
                 fileName: nil,
-                onOpen: { url in openDocument(at: url) }
+                onOpen: { url in beginOpeningDocument(at: url) }
             )
         }
         .sheet(isPresented: $showSettings) {
             IOSSettingsView()
+        }
+        .overlay {
+            if isOpening {
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+                    ProgressView("Opening…")
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .transition(.opacity)
+            }
         }
         .task { await FileProviderPrimer.startPrewarm() }
     }
@@ -175,38 +188,11 @@ struct IOSRootView: View {
     private func openRecentBook(_ entry: AutoSavedPosition) async {
         browserLog.info("openRecentBook: \(entry.fileName, privacy: .public), path=\(entry.filePathString ?? "nil", privacy: .public), hint=\(entry.relativePathHint ?? "nil", privacy: .public)")
 
-        // 1. Try device-local URL bookmark (instant if previously opened on this device).
-        //    Works well for iCloud Drive; unreliable for third-party file providers.
-        if let url = BookmarkStore.shared.resolveURL(for: entry.id) {
-            openDocument(at: url)
+        if await openUsingStoredAccess(entry) {
             return
         }
 
-        // 2. Ask the FileProvider extension to vend a fresh URL via the
-        //    captured (domain, item) identifier. This is the path that works
-        //    for Nextcloud, Dropbox, etc. — the provider extension re-applies
-        //    a fresh security scope each time, so it survives reboots and
-        //    extension restarts.
-        if let ref = BookmarkStore.shared.fileProviderRef(for: entry.id),
-           let url = await FileProviderPrimer.resolveFileProviderURL(ref) {
-            browserLog.info("FileProvider resolved to \(url.lastPathComponent, privacy: .public)")
-            openDocument(at: url)
-            return
-        }
-
-        // 3. Try direct file access at synced paths (sometimes works for local iCloud files)
-        for url in Self.candidateURLs(for: entry) {
-            let started = url.startAccessingSecurityScopedResource()
-            if started || FileManager.default.isReadableFile(atPath: url.path) {
-                browserLog.info("Direct access at \(url.path, privacy: .public)")
-                openDocument(at: url)
-                // openDocument holds its own access; release the probe's.
-                if started { url.stopAccessingSecurityScopedResource() }
-                return
-            }
-        }
-
-        // 4. Present a document picker pointed at the file's parent folder.
+        // Present a document picker pointed at the file's parent folder.
         //    iOS requires the user to tap the file once to grant access.
         //    The picker opens in the right folder — one tap to open.
         if let dirURL = Self.parentDirectoryURL(for: entry) {
@@ -216,7 +202,7 @@ struct IOSRootView: View {
             return
         }
 
-        // 5. No path info at all — open a general picker
+        // No path info at all — open a general picker
         browserLog.info("No path info, presenting general picker")
         pickerFileName = entry.fileName
         pickerDirectoryURL = URL(fileURLWithPath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/")
@@ -263,23 +249,71 @@ struct IOSRootView: View {
 
     // MARK: - Document handling
 
-    private func openDocument(at url: URL) {
+    private func openUsingStoredAccess(_ entry: AutoSavedPosition) async -> Bool {
+        if let url = BookmarkStore.shared.resolveURL(for: entry.id),
+           await openDocument(at: url, showError: false) == nil {
+            return true
+        }
+
+        if let ref = BookmarkStore.shared.fileProviderRef(for: entry.id),
+           let url = await FileProviderPrimer.resolveFileProviderURL(ref, budget: .probe),
+           await openDocument(at: url, showError: false) == nil {
+            browserLog.info("FileProvider resolved to \(url.lastPathComponent, privacy: .public)")
+            return true
+        }
+
+        for url in Self.candidateURLs(for: entry) {
+            guard FileManager.default.isReadableFile(atPath: url.path) else { continue }
+            if await openDocument(at: url, showError: false) == nil {
+                browserLog.info("Direct access at \(url.path, privacy: .public)")
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func beginOpeningDocument(at url: URL) {
+        Task { await openDocument(at: url) }
+    }
+
+    @discardableResult
+    private func openDocument(at url: URL, showError: Bool = true) async -> Error? {
+        let requestID = UUID()
+        activeOpenRequestID = requestID
+        isOpening = true
+        defer {
+            if activeOpenRequestID == requestID {
+                activeOpenRequestID = nil
+                isOpening = false
+            }
+        }
+
         let accessing = url.startAccessingSecurityScopedResource()
         browserLog.info("Opening \(url.lastPathComponent, privacy: .public), securityScoped=\(accessing)")
 
         do {
-            let data = try Data(contentsOf: url)
-            let ext = url.pathExtension.lowercased()
-            let contentType = UTType(filenameExtension: ext) ?? .data
-            let content = try DocumentContent.parse(
-                data: data,
-                contentType: contentType,
-                filename: url.lastPathComponent
-            )
-            let doc = ReaderDocument(content: content, rawData: data)
-            // Release the previous document's security scope before replacing
-            // it — otherwise opening a file while another is showing leaks the
-            // old scope for the rest of the session.
+            let filename = url.lastPathComponent
+            let (data, content, hash) = try await Task.detached(priority: .userInitiated) {
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                let ext = url.pathExtension.lowercased()
+                let contentType = UTType(filenameExtension: ext) ?? .data
+                let content = try DocumentContent.parse(
+                    data: data,
+                    contentType: contentType,
+                    filename: filename
+                )
+                return (data, content, FileHasher.hash(data: data))
+            }.value
+
+            // A second open request may have arrived while parsing. Never let
+            // an older, slower archive replace the newer selection.
+            guard activeOpenRequestID == requestID else {
+                if accessing { url.stopAccessingSecurityScopedResource() }
+                return CancellationError()
+            }
+
+            let doc = ReaderDocument(content: content, rawData: data, fileHash: hash)
             if let previous = openedDocument, previous.securityScoped {
                 previous.fileURL.stopAccessingSecurityScopedResource()
             }
@@ -288,20 +322,25 @@ struct IOSRootView: View {
                 fileURL: url,
                 securityScoped: accessing
             )
-            let hash = FileHasher.hash(data: data)
             BookmarkStore.shared.saveURLBookmark(for: url, fileHash: hash)
             BookmarkStore.shared.updatePathHint(for: hash, url: url)
             CoverThumbnailCache.shared.generateIfNeeded(for: content, fileHash: hash)
             Task { await FileProviderPrimer.captureFileProviderRef(url: url, fileHash: hash) }
             browserLog.info("Document opened successfully: \(url.lastPathComponent, privacy: .public)")
+            return nil
         } catch {
             browserLog.error("Failed to open: \(error.localizedDescription, privacy: .public)")
-            if accessing {
-                url.stopAccessingSecurityScopedResource()
+            if accessing { url.stopAccessingSecurityScopedResource() }
+            if showError && activeOpenRequestID == requestID && !(error is CancellationError) {
+                presentOpenError(error)
             }
-            errorMessage = error.localizedDescription
-            showError = true
+            return error
         }
+    }
+
+    private func presentOpenError(_ error: Error) {
+        errorMessage = error.localizedDescription
+        showError = true
     }
 
     private func closeDocument() {
@@ -321,7 +360,7 @@ struct IOSRootView: View {
             return
         }
         clearPendingSharedFile()
-        openDocument(at: fileURL)
+        beginOpeningDocument(at: fileURL)
     }
 
     private func clearPendingSharedFile() {
@@ -425,7 +464,7 @@ private struct RecentsGridSection: View {
                 .font(.headline)
             Text("The first time you open a book on a new device you need to locate it in the file picker.")
                 .fixedSize(horizontal: false, vertical: true)
-            Text("With some third-party file providers, you may be presented with the file picker when you shouldn't be. If you dismiss it and try again, the book might open.")
+            Text("After that, the app tries the saved provider location and asks you to locate the file again only if iOS cannot open it.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

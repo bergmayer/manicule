@@ -252,32 +252,53 @@ class View {
     }
     async load(src, afterLoad, beforeRender) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
-        return new Promise(resolve => {
+        return new Promise((resolve, reject) => {
+            let settled = false
+            const timeout = setTimeout(() => {
+                if (settled) return
+                settled = true
+                reject(new Error('Timed out loading publication section'))
+            }, 15_000)
+            this.#iframe.addEventListener('error', () => {
+                if (settled) return
+                settled = true
+                clearTimeout(timeout)
+                reject(new Error('Failed to load publication section'))
+            }, { once: true })
             this.#iframe.addEventListener('load', () => {
-                const doc = this.document
-                afterLoad?.(doc)
+                if (settled) return
+                try {
+                    const doc = this.document
+                    afterLoad?.(doc)
 
-                // it needs to be visible for Firefox to get computed style
-                this.#iframe.style.display = 'block'
-                const { vertical, rtl } = getDirection(doc)
-                const background = getBackground(doc)
-                this.#iframe.style.display = 'none'
+                    // it needs to be visible for Firefox to get computed style
+                    this.#iframe.style.display = 'block'
+                    const { vertical, rtl } = getDirection(doc)
+                    const background = getBackground(doc)
+                    this.#iframe.style.display = 'none'
 
-                this.#vertical = vertical
-                this.#rtl = rtl
+                    this.#vertical = vertical
+                    this.#rtl = rtl
 
-                this.#contentRange.selectNodeContents(doc.body)
-                const layout = beforeRender?.({ vertical, rtl, background })
-                this.#iframe.style.display = 'block'
-                this.render(layout)
-                this.#observer.observe(doc.body)
+                    this.#contentRange.selectNodeContents(doc.body)
+                    const layout = beforeRender?.({ vertical, rtl, background })
+                    this.#iframe.style.display = 'block'
+                    this.render(layout)
+                    this.#observer.observe(doc.body)
 
-                // the resize observer above doesn't work in Firefox
-                // (see https://bugzilla.mozilla.org/show_bug.cgi?id=1832939)
-                // until the bug is fixed we can at least account for font load
-                doc.fonts.ready.then(() => this.expand())
+                    // the resize observer above doesn't work in Firefox
+                    // (see https://bugzilla.mozilla.org/show_bug.cgi?id=1832939)
+                    // until the bug is fixed we can at least account for font load
+                    doc.fonts.ready.then(() => this.expand())
 
-                resolve()
+                    settled = true
+                    clearTimeout(timeout)
+                    resolve()
+                } catch (e) {
+                    settled = true
+                    clearTimeout(timeout)
+                    reject(e)
+                }
             }, { once: true })
             this.#iframe.src = src
         })
@@ -672,16 +693,26 @@ export class Paginator extends HTMLElement {
         })
     }
     #createView() {
-        if (this.#view) {
-            this.#view.destroy()
-            this.#container.removeChild(this.#view.element)
-        }
-        this.#view = new View({
+        let view
+        view = new View({
             container: this,
-            onExpand: () => this.#scrollToAnchor(this.#anchor),
+            // ResizeObserver and font events can fire while a replacement is
+            // still staged. Scrolling then would use the old (or nil) current
+            // view and can race initial rendering into a blank state.
+            onExpand: () => {
+                if (this.#view === view) this.#scrollToAnchor(this.#anchor)
+            },
         })
-        this.#container.append(this.#view.element)
-        return this.#view
+        // Keep the current section visible until the replacement has loaded.
+        // The staged element is connected (required by WebKit) but cannot
+        // affect layout or receive input.
+        Object.assign(view.element.style, {
+            position: 'absolute',
+            visibility: 'hidden',
+            pointerEvents: 'none',
+        })
+        this.#container.append(view.element)
+        return view
     }
     #beforeRender({ vertical, rtl, background }) {
         this.#vertical = vertical
@@ -986,10 +1017,11 @@ export class Paginator extends HTMLElement {
     }
     async #display(promise) {
         const { index, src, anchor, onLoad, select } = await promise
-        this.#index = index
+        if (!Number.isInteger(index)) throw new Error('Invalid section index')
         const hasFocus = this.#view?.document?.hasFocus()
         if (src) {
             const view = this.#createView()
+            let loadedDetail
             const afterLoad = doc => {
                 if (doc.head) {
                     const $styleBefore = doc.createElement('style')
@@ -998,18 +1030,38 @@ export class Paginator extends HTMLElement {
                     doc.head.append($style)
                     this.#styleMap.set(doc, [$styleBefore, $style])
                 }
-                onLoad?.({ doc, index })
+                loadedDetail = { doc, index }
             }
             const beforeRender = this.#beforeRender.bind(this)
-            await view.load(src, afterLoad, beforeRender)
-            this.dispatchEvent(new CustomEvent('create-overlayer', {
-                detail: {
-                    doc: view.document, index,
-                    attach: overlayer => view.overlayer = overlayer,
-                },
-            }))
-            this.#view = view
+            try {
+                await view.load(src, afterLoad, beforeRender)
+                this.dispatchEvent(new CustomEvent('create-overlayer', {
+                    detail: {
+                        doc: view.document, index,
+                        attach: overlayer => view.overlayer = overlayer,
+                    },
+                }))
+                const previousView = this.#view
+                Object.assign(view.element.style, {
+                    position: 'relative',
+                    visibility: 'visible',
+                    pointerEvents: 'auto',
+                })
+                this.#view = view
+                onLoad?.(loadedDetail)
+                previousView?.destroy()
+                previousView?.element.remove()
+            } catch (e) {
+                view.destroy()
+                view.element.remove()
+                throw e
+            }
         }
+        if (!this.#view) throw new Error(`Section ${index} did not provide content`)
+        // Commit the index only after the replacement view loaded. A failed
+        // section must leave both the visible content and logical position at
+        // the previous section.
+        this.#index = index
         await this.scrollToAnchor((typeof anchor === 'function'
             ? anchor(this.#view.document) : anchor) ?? 0, select)
         if (hasFocus) this.focusView()
@@ -1026,19 +1078,19 @@ export class Paginator extends HTMLElement {
                 this.setStyles(this.#styles)
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
-            await this.#display(Promise.resolve(this.sections[index].load())
-                .then(src => ({ index, src, anchor, onLoad, select }))
-                .catch(e => {
-                    console.warn(e)
-                    console.warn(new Error(`Failed to load section ${index}`))
-                    return {}
-                }))
+            try {
+                const src = await this.sections[index].load()
+                await this.#display({ index, src, anchor, onLoad, select })
+            } catch (e) {
+                console.warn(e)
+                throw new Error(`Failed to load section ${index}`, { cause: e })
+            }
         }
     }
     async goTo(target) {
-        if (this.#locked) return
+        while (this.#locked) await wait(10)
         const resolved = await target
-        if (this.#canGoToIndex(resolved.index)) return this.#goTo(resolved)
+        if (resolved && this.#canGoToIndex(resolved.index)) return this.#goTo(resolved)
     }
     #scrollPrev(distance) {
         if (!this.#view) return true
@@ -1074,16 +1126,20 @@ export class Paginator extends HTMLElement {
             if (this.sections[index]?.linear !== 'no') return index
     }
     async #turnPage(dir, distance) {
-        if (this.#locked) return
+        while (this.#locked) await wait(10)
         this.#locked = true
-        const prev = dir === -1
-        const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
-        if (shouldGo) await this.#goTo({
-            index: this.#adjacentIndex(dir),
-            anchor: prev ? () => 1 : () => 0,
-        })
-        if (shouldGo || !this.hasAttribute('animated')) await wait(100)
-        this.#locked = false
+        try {
+            const prev = dir === -1
+            const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
+            const index = shouldGo ? this.#adjacentIndex(dir) : null
+            if (index != null) await this.#goTo({
+                index,
+                anchor: prev ? () => 1 : () => 0,
+            })
+            if (shouldGo || !this.hasAttribute('animated')) await wait(100)
+        } finally {
+            this.#locked = false
+        }
     }
     prev(distance) {
         return this.#turnPage(-1, distance)
@@ -1125,11 +1181,16 @@ export class Paginator extends HTMLElement {
         } else $style.textContent = styles
 
         // NOTE: needs `requestAnimationFrame` in Chromium
-        requestAnimationFrame(() =>
-            this.#background.style.background = getBackground(this.#view.document))
+        const view = this.#view
+        requestAnimationFrame(() => {
+            if (this.#view === view && view?.document)
+                this.#background.style.background = getBackground(view.document)
+        })
 
         // needed because the resize observer doesn't work in Firefox
-        this.#view?.document?.fonts?.ready?.then(() => this.#view.expand())
+        view?.document?.fonts?.ready?.then(() => {
+            if (this.#view === view) view.expand()
+        })
     }
     focusView() {
         this.#view.document.defaultView.focus()

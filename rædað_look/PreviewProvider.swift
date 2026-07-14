@@ -194,10 +194,7 @@ class PreviewProvider: QLPreviewProvider, QLPreviewingController {
     // MARK: - Text Preview
 
     private func makeTextPreview(data: Data, title: String) throws -> QLPreviewReply {
-        guard let text = String(data: data, encoding: .utf8)
-                ?? String(data: data, encoding: .ascii) else {
-            throw PreviewError.noContent
-        }
+        let text = try Self.decodeText(data)
         let escaped = Self.escapeHTML(text)
         let html = """
         <!DOCTYPE html>
@@ -236,10 +233,7 @@ class PreviewProvider: QLPreviewProvider, QLPreviewingController {
     // MARK: - Markdown Preview
 
     private func makeMarkdownPreview(data: Data, title: String) throws -> QLPreviewReply {
-        guard let text = String(data: data, encoding: .utf8)
-                ?? String(data: data, encoding: .ascii) else {
-            throw PreviewError.noContent
-        }
+        let text = try Self.decodeText(data)
         let rendered = Self.renderMarkdown(text)
         let html = """
         <!DOCTYPE html>
@@ -769,6 +763,44 @@ class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             with: "<a href=\"$2\">$1</a>",
             options: .regularExpression)
         return result
+    }
+
+    private static func decodeText(_ data: Data) throws -> String {
+        if data.isEmpty { return "" }
+        let bytes = [UInt8](data.prefix(4_096))
+        var encodings: [String.Encoding] = [.utf8]
+        if bytes.starts(with: [0xFF, 0xFE, 0x00, 0x00])
+            || bytes.starts(with: [0x00, 0x00, 0xFE, 0xFF]) {
+            encodings.append(.utf32)
+        } else if bytes.starts(with: [0xFF, 0xFE]) {
+            encodings.append(.utf16LittleEndian)
+        } else if bytes.starts(with: [0xFE, 0xFF]) {
+            encodings.append(.utf16BigEndian)
+        } else if bytes.count >= 4, bytes.count.isMultiple(of: 2) {
+            let pairs = bytes.count / 2
+            let evenZeros = stride(from: 0, to: bytes.count, by: 2)
+                .reduce(0) { $0 + (bytes[$1] == 0 ? 1 : 0) }
+            let oddZeros = stride(from: 1, to: bytes.count, by: 2)
+                .reduce(0) { $0 + (bytes[$1] == 0 ? 1 : 0) }
+            if oddZeros * 3 > pairs { encodings.append(.utf16LittleEndian) }
+            if evenZeros * 3 > pairs { encodings.append(.utf16BigEndian) }
+        }
+        encodings.append(contentsOf: [.windowsCP1252, .isoLatin1, .macOSRoman])
+        for encoding in encodings {
+            if let text = String(data: data, encoding: encoding) {
+                let sample = text.unicodeScalars.prefix(4_096)
+                let count = sample.count
+                let controls = sample.reduce(into: 0) { result, scalar in
+                    if scalar.value == 0
+                        || scalar.properties.generalCategory == .control
+                            && scalar.value != 9 && scalar.value != 10 && scalar.value != 13 {
+                        result += 1
+                    }
+                }
+                if count == 0 || Double(controls) / Double(count) < 0.05 { return text }
+            }
+        }
+        throw PreviewError.noContent
     }
 }
 
