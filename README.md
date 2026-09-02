@@ -32,6 +32,8 @@ There is also a built-in narration feature on iOS/iPad where the app will use bu
 
 Open `Manicule.xcodeproj` in Xcode and install it on your devices.  I don't want to put this in the app store since I don't want to provide tech support; that said, it's sort of annoying that an app with this exact feature set is not already in the app store.  In fact I think Apple's Preview should just have most of these features.  On Apple devices by default if you try to open a DRM-free ebook it copies it over into Apple Books.  Stupid!
 
+The macOS Debug and Release configurations use “Sign to Run Locally,” so they do not require an Apple Developer account or provisioning profile. These local builds remain sandboxed but omit the iCloud key-value-store entitlement; bookmarks and settings therefore stay local. `Manicule-macOS.entitlements` retains the iCloud capability as an opt-in entitlement file if provisioned builds are ever needed.
+
 ## Third-party code
 
 ePub rendering uses [foliate-js](https://github.com/johnfactotum/foliate-js) by John Factotum, vendored in `Manicule/Resources/foliate-js/`. It handles ePub parsing, pagination, CFI-based navigation, and search. MIT licensed; see `Manicule/Resources/foliate-js/LICENSE`.
