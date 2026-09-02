@@ -1,5 +1,5 @@
 import XCTest
-@testable import rædað
+@testable import Manicule
 
 final class PageNavigationTests: XCTestCase {
     func testEvenTwoUpDocumentStopsAtFinalSpread() {

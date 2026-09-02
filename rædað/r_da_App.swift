@@ -1,6 +1,6 @@
 //
 //  r_da_App.swift
-//  rædað
+//  Manicule
 //
 //  Created by John Bergmayer on 2/24/26.
 //
@@ -8,7 +8,7 @@
 import SwiftUI
 
 @main
-struct r_da_App: App {
+struct ManiculeApp: App {
     var body: some Scene {
         #if os(iOS)
         WindowGroup {

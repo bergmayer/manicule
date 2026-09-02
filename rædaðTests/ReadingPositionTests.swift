@@ -1,5 +1,5 @@
 import XCTest
-@testable import rædað
+@testable import Manicule
 
 @MainActor
 final class ReadingPositionTests: XCTestCase {

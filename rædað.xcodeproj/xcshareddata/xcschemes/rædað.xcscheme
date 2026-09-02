@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "311F13BB2F4DE7BF007FDDEA"
-               BuildableName = "r&#xe6;da&#xf0;.app"
+               BuildableName = "Manicule.app"
                BlueprintName = "r&#xe6;da&#xf0;"
                ReferencedContainer = "container:r&#xe6;da&#xf0;.xcodeproj">
             </BuildableReference>
@@ -58,7 +58,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "311F13BB2F4DE7BF007FDDEA"
-            BuildableName = "r&#xe6;da&#xf0;.app"
+            BuildableName = "Manicule.app"
             BlueprintName = "r&#xe6;da&#xf0;"
             ReferencedContainer = "container:r&#xe6;da&#xf0;.xcodeproj">
          </BuildableReference>
@@ -75,7 +75,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "311F13BB2F4DE7BF007FDDEA"
-            BuildableName = "r&#xe6;da&#xf0;.app"
+            BuildableName = "Manicule.app"
             BlueprintName = "r&#xe6;da&#xf0;"
             ReferencedContainer = "container:r&#xe6;da&#xf0;.xcodeproj">
          </BuildableReference>

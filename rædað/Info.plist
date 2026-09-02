@@ -56,7 +56,7 @@
 		     may also export types for .cbz/.cbr. The system picks one type
 		     per extension; if another app wins, our custom type won't match.
 		     We claim our types (Owner) and parent archive types (Alternate)
-		     so we appear in Open With regardless. Setting rædað as the
+		     so we appear in Open With regardless. Setting Manicule as the
 		     default handler for .cbz/.cbr ensures our QL extension runs. -->
 		<dict>
 			<key>CFBundleTypeName</key>

@@ -60,6 +60,8 @@ struct ReadingSettingsView: View {
     @State private var reflowText: Bool = false
     @State private var textAlign: TextAlignment = .natural
     @State private var usePerBookOverride: Bool = false
+    @State private var appIcon = AppIconChoice.current
+    @State private var appIconErrorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -142,8 +144,23 @@ struct ReadingSettingsView: View {
                             Text(t.rawValue).tag(t)
                         }
                     }
-                    .pickerStyle(.segmented)
                 }
+
+                #if os(iOS)
+                if fileHash == nil {
+                    Section("App Icon") {
+                        Picker("Color", selection: $appIcon) {
+                            ForEach(AppIconChoice.allCases) { choice in
+                                Text(choice.displayName).tag(choice)
+                            }
+                        }
+                        .disabled(!UIApplication.shared.supportsAlternateIcons)
+                        .onChange(of: appIcon) { _, choice in
+                            changeAppIcon(to: choice)
+                        }
+                    }
+                }
+                #endif
 
                 if showReflowOption {
                     Section {
@@ -192,10 +209,34 @@ struct ReadingSettingsView: View {
             .onChange(of: reflowText) { _, _ in applyLive() }
             .onChange(of: textAlign) { _, _ in applyLive() }
         }
+        .alert("Couldn't Change App Icon", isPresented: Binding(
+            get: { appIconErrorMessage != nil },
+            set: { if !$0 { appIconErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(appIconErrorMessage ?? "Unknown error")
+        }
         #if os(macOS)
         .frame(minHeight: 600)
         #endif
     }
+
+    #if os(iOS)
+    private func changeAppIcon(to choice: AppIconChoice) {
+        guard choice.alternateIconName != UIApplication.shared.alternateIconName else {
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await UIApplication.shared.setAlternateIconName(choice.alternateIconName)
+            } catch {
+                appIcon = .current
+                appIconErrorMessage = error.localizedDescription
+            }
+        }
+    }
+    #endif
 
     @ViewBuilder
     private var previewText: some View {

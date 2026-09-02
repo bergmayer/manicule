@@ -22,6 +22,7 @@
 		A73D11B22C33D44E55F60011 /* PageNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73D11B22C33D44E55F60001 /* PageNavigationTests.swift */; };
 		A73D11B22C33D44E55F60012 /* LocalFileSchemeHandlerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73D11B22C33D44E55F60002 /* LocalFileSchemeHandlerTests.swift */; };
 		A73D11B22C33D44E55F60013 /* EPubWebViewIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73D11B22C33D44E55F60003 /* EPubWebViewIntegrationTests.swift */; };
+		A9C0B1D2E3F4051627384901 /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */; };
 		B3D4E5F607182A3B4C5D6E7F /* TestFilesIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* TestFilesIntegrationTests.swift */; };
 		E1CA533237882F0E8A02C47D /* RelocateEventTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A447A41AF71C2B803B61F2C /* RelocateEventTests.swift */; };
 /* End PBXBuildFile section */
@@ -67,7 +68,7 @@
 
 /* Begin PBXFileReference section */
 		0A447A41AF71C2B803B61F2C /* RelocateEventTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RelocateEventTests.swift; path = "rædaðTests/RelocateEventTests.swift"; sourceTree = "<group>"; };
-		311F13BC2F4DE7BF007FDDEA /* rædað.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "rædað.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		311F13BC2F4DE7BF007FDDEA /* Manicule.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Manicule.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		311F14012F4DF17F007FDDEA /* rædað_look.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "rædað_look.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		311F14032F4DF17F007FDDEA /* QuickLook.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuickLook.framework; path = System/Library/Frameworks/QuickLook.framework; sourceTree = SDKROOT; };
 		3154DE612F4E0844007EAE24 /* rædað.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "rædað.entitlements"; sourceTree = "<group>"; };
@@ -81,6 +82,7 @@
 		A73D11B22C33D44E55F60001 /* PageNavigationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PageNavigationTests.swift; sourceTree = "<group>"; };
 		A73D11B22C33D44E55F60002 /* LocalFileSchemeHandlerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalFileSchemeHandlerTests.swift; sourceTree = "<group>"; };
 		A73D11B22C33D44E55F60003 /* EPubWebViewIntegrationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPubWebViewIntegrationTests.swift; sourceTree = "<group>"; };
+		A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "rædað/Utilities/MarkdownHTMLRenderer.swift"; sourceTree = "<group>"; };
 		D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DocumentContentTests.swift; sourceTree = "<group>"; };
 		F401D3A3C8F6802799E4ECF1 /* rædaðTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "rædaðTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -177,6 +179,7 @@
 		311F13B32F4DE7BF007FDDEA = {
 			isa = PBXGroup;
 			children = (
+				A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */,
 				311F13BE2F4DE7BF007FDDEA /* rædað */,
 				311F14052F4DF17F007FDDEA /* rædað_look */,
 				31A5B0052F500005007FDDEA /* rædað_share */,
@@ -192,7 +195,7 @@
 		311F13BD2F4DE7BF007FDDEA /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				311F13BC2F4DE7BF007FDDEA /* rædað.app */,
+				311F13BC2F4DE7BF007FDDEA /* Manicule.app */,
 				311F14012F4DF17F007FDDEA /* rædað_look.appex */,
 				31A5B0012F500001007FDDEA /* rædað_share.appex */,
 				F401D3A3C8F6802799E4ECF1 /* rædaðTests.xctest */,
@@ -266,8 +269,8 @@
 				311F13EF2F4DEDF1007FDDEA /* ZIPFoundation */,
 				3154DF632F4E19A3007EAE24 /* Unrar */,
 			);
-			productName = "rædað";
-			productReference = 311F13BC2F4DE7BF007FDDEA /* rædað.app */;
+			productName = Manicule;
+			productReference = 311F13BC2F4DE7BF007FDDEA /* Manicule.app */;
 			productType = "com.apple.product-type.application";
 		};
 		311F14002F4DF17F007FDDEA /* rædað_look */ = {
@@ -422,6 +425,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A9C0B1D2E3F4051627384901 /* MarkdownHTMLRenderer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -595,6 +599,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				"ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES[sdk=iphoneos*]" = "AppIconBurgundy AppIconIndigo AppIconOchre";
+				"ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES[sdk=iphonesimulator*]" = "AppIconBurgundy AppIconIndigo AppIconOchre";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "rædað.entitlements";
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "rædað_macOS.entitlements";
@@ -608,6 +614,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "rædað/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Manicule;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
@@ -622,7 +629,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.palefire.r-da-.r-da-";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = Manicule;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -641,6 +648,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				"ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES[sdk=iphoneos*]" = "AppIconBurgundy AppIconIndigo AppIconOchre";
+				"ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES[sdk=iphonesimulator*]" = "AppIconBurgundy AppIconIndigo AppIconOchre";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "rædað.entitlements";
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "rædað_macOS.entitlements";
@@ -654,6 +663,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "rædað/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Manicule;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
@@ -668,7 +678,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.palefire.r-da-.r-da-";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = Manicule;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -840,7 +850,7 @@
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos macosx";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/rædað.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/rædað";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Manicule.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Manicule";
 				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
@@ -858,7 +868,7 @@
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos macosx";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/rædað.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/rædað";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Manicule.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Manicule";
 			};
 			name = Debug;
 		};

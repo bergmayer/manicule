@@ -1,11 +1,10 @@
 <p align="center">
-  <img src="letters_logo.jpg" width="256" alt="Rædað logo">&nbsp;&nbsp;&nbsp;
-  <img src="dragon_book.jpg" width="128" height="128" alt="Rædað app icon">
+  <img src="rædað/Assets.xcassets/AppIcon.appiconset/icon_1024x1024.png" width="192" alt="Manicule app icon">
 </p>
 
-# Rædað
+# Manicule
 
-**Rædað** is Old English for "we read." The letter **ð** (eth) is a voiced "th" (as in *father* or *breathe*) so it sounds roughly like **RAD-ath**.
+**Manicule** is named for the pointing-hand mark readers historically drew in a book's margin to call attention to a passage. It is the reader companion to [Pilcrow](https://github.com/bergmayer/pilcrow), the text editor.
 
 ## What it is
 

@@ -1,4 +1,4 @@
-# rædað — Swift Project Guide
+# Manicule — Swift Project Guide
 
 Cross-platform (macOS, iOS, visionOS) ePub/PDF/Comic/Text reader app built with SwiftUI.
 

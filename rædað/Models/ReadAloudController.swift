@@ -245,7 +245,7 @@ final class ReadAloudController: NSObject {
     private func updateNowPlaying() {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: "Read Aloud",
-            MPMediaItemPropertyArtist: "rædað",
+            MPMediaItemPropertyArtist: "Manicule",
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? speed : 0.0,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPMediaItemPropertyMediaType: MPMediaType.anyAudio.rawValue,
@@ -403,11 +403,22 @@ final class ReadAloudController: NSObject {
         ("\\*{1,3}(.+?)\\*{1,3}", "$1"),
         ("_{1,2}(.+?)_{1,2}", "$1"),
         ("`([^`]+)`", "$1"),
-    ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
+    ].map { (makeRegex($0.0), $0.1) }
 
-    nonisolated private static let mdHRule = try! NSRegularExpression(pattern: "^[-*_]{3,}\\s*$", options: .anchorsMatchLines)
-    nonisolated private static let excessiveNewlines = try! NSRegularExpression(pattern: "\\n{3,}")
-    nonisolated private static let htmlTags = try! NSRegularExpression(pattern: "<[^>]+>")
+    nonisolated private static let mdHRule = makeRegex("^[-*_]{3,}\\s*$", options: .anchorsMatchLines)
+    nonisolated private static let excessiveNewlines = makeRegex("\\n{3,}")
+    nonisolated private static let htmlTags = makeRegex("<[^>]+>")
+
+    nonisolated private static func makeRegex(
+        _ pattern: String,
+        options: NSRegularExpression.Options = []
+    ) -> NSRegularExpression {
+        do {
+            return try NSRegularExpression(pattern: pattern, options: options)
+        } catch {
+            preconditionFailure("Invalid built-in regular expression '\(pattern)': \(error)")
+        }
+    }
 
     nonisolated static func stripMarkdown(_ text: String) -> String {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)

@@ -1,5 +1,5 @@
 import XCTest
-@testable import rædað
+@testable import Manicule
 
 final class LocalFileSchemeHandlerTests: XCTestCase {
     func testRejectsBundleTraversal() throws {
@@ -55,5 +55,65 @@ final class LocalFileSchemeHandlerTests: XCTestCase {
         let resolved = LocalFileSchemeHandler.resolvedFile(
             relativePath: "images/cover.jpg", under: root)
         XCTAssertEqual(resolved?.path, root.appendingPathComponent("images/cover.jpg").path)
+    }
+
+    func testMIMETypeLookupHandlesAliasesAndUnknownExtensions() {
+        XCTAssertEqual(LocalFileSchemeHandler.mimeType(for: "HTML"), "text/html")
+        XCTAssertEqual(LocalFileSchemeHandler.mimeType(for: "jpeg"), "image/jpeg")
+        XCTAssertEqual(LocalFileSchemeHandler.mimeType(for: "unknown"), "application/octet-stream")
+    }
+}
+
+final class MarkdownHTMLRendererTests: XCTestCase {
+    func testRendersBlocksInlineMarkupAndHeadingAnchors() {
+        let markdown = """
+        # Heading
+
+        A **bold** paragraph with `literal *code*`.
+
+        - First
+        - Second
+        """
+
+        let html = MarkdownHTMLRenderer.render(markdown, headingAnchorPrefix: "toc-")
+
+        XCTAssertTrue(html.contains("<h1 id=\"toc-0\">Heading</h1>"))
+        XCTAssertTrue(html.contains("<strong>bold</strong>"))
+        XCTAssertTrue(html.contains("<code>literal *code*</code>"))
+        XCTAssertTrue(html.contains("<ul><li>First</li><li>Second</li></ul>"))
+    }
+
+    func testRendersTableAndEscapesUnsafeText() {
+        let markdown = """
+        | Name | Value |
+        | --- | ---: |
+        | A&B | <unsafe> |
+        """
+
+        let html = MarkdownHTMLRenderer.render(markdown)
+
+        XCTAssertTrue(html.contains("<thead><tr><th>Name</th><th>Value</th></tr></thead>"))
+        XCTAssertTrue(html.contains("<td>A&amp;B</td>"))
+        XCTAssertTrue(html.contains("<td>&lt;unsafe&gt;</td>"))
+    }
+}
+
+final class ReaderThemeTests: XCTestCase {
+    func testIncludesPilcrowColorThemes() {
+        let expected = [
+            "Solarized Light", "Solarized Dark", "Dracula", "Nord", "Platinum",
+            "Norton", "Amber CRT", "Phosphor Green", "Black and White",
+        ]
+        XCTAssertTrue(expected.allSatisfy { name in
+            ReaderTheme.allCases.contains { $0.rawValue == name }
+        })
+    }
+
+    func testPortedThemeColorsMatchPilcrowPalettes() {
+        XCTAssertEqual(ReaderTheme.solarizedDark.cssBackground, "#002b36")
+        XCTAssertEqual(ReaderTheme.dracula.cssForeground, "#f8f8f2")
+        XCTAssertEqual(ReaderTheme.nord.cssAccent, "#88c0d0")
+        XCTAssertEqual(ReaderTheme.amber.cssForeground, "#ffb000")
+        XCTAssertEqual(ReaderTheme.phosphorGreen.cssBackground, "#000c00")
     }
 }

@@ -86,7 +86,10 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
         super.init(nibName: nil, bundle: nil)
     }
 
-    required init?(coder: NSCoder) { fatalError() }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        return nil
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()

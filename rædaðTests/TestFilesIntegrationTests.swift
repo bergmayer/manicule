@@ -1,7 +1,7 @@
 import XCTest
 import UniformTypeIdentifiers
 import PDFKit
-@testable import rædað
+@testable import Manicule
 
 /// Integration tests that run against real files in the `test_files/` directory.
 ///

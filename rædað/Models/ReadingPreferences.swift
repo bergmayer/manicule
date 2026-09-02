@@ -352,6 +352,9 @@ struct EffectivePreferences: Sendable {
             css += "\n    color: \(textColor) !important;"
         }
         css += "\n}"
+        if let accentColor = theme.cssAccent {
+            css += "\na { color: \(accentColor) !important; }"
+        }
         return css
     }
 
@@ -417,7 +420,7 @@ struct EffectivePreferences: Sendable {
             dt, figcaption, caption, label, cite, q, pre, code {
                 color: \(textColor) !important;
             }
-            a { color: \(textColor) !important; text-decoration: underline; }
+            a { color: \(theme.cssAccent ?? textColor) !important; text-decoration: underline; }
             img, svg, video, canvas, figure { mix-blend-mode: normal; }
             """
         }
@@ -597,59 +600,83 @@ enum ReaderTheme: String, Codable, Sendable, CaseIterable {
     case dark = "Dark"
     case oled = "OLED Black"
     case sepia = "Sepia"
+    case solarizedLight = "Solarized Light"
+    case solarizedDark = "Solarized Dark"
+    case dracula = "Dracula"
+    case nord = "Nord"
+    case platinum = "Platinum"
+    case norton = "Norton"
+    case amber = "Amber CRT"
+    case phosphorGreen = "Phosphor Green"
+    case blackAndWhite = "Black and White"
+
+    nonisolated private var palette: ReaderThemePalette? {
+        switch self {
+        case .system: nil
+        case .light: .init(background: 0xFFFFFF, foreground: 0x000000, accent: 0x0066CC, isDark: false)
+        case .dark: .init(background: 0x1C1C1E, foreground: 0xE5E5E7, accent: 0x64B5F6, isDark: true)
+        case .oled: .init(background: 0x000000, foreground: 0xE5E5E7, accent: 0x64B5F6, isDark: true)
+        case .sepia: .init(background: 0xF5E6C8, foreground: 0x3B2E1A, accent: 0x8B5A2B, isDark: false)
+        case .solarizedLight: .init(background: 0xFDF6E3, foreground: 0x657B83, accent: 0x268BD2, isDark: false)
+        case .solarizedDark: .init(background: 0x002B36, foreground: 0x839496, accent: 0x268BD2, isDark: true)
+        case .dracula: .init(background: 0x282A36, foreground: 0xF8F8F2, accent: 0xBD93F9, isDark: true)
+        case .nord: .init(background: 0x2E3440, foreground: 0xD8DEE9, accent: 0x88C0D0, isDark: true)
+        case .platinum: .init(background: 0xDDDDDD, foreground: 0x000000, accent: 0x3B78FF, isDark: false)
+        case .norton: .init(background: 0x0000AA, foreground: 0xFFFFFF, accent: 0x55FFFF, isDark: true)
+        case .amber: .init(background: 0x0F0800, foreground: 0xFFB000, accent: 0xFFB000, isDark: true)
+        case .phosphorGreen: .init(background: 0x000C00, foreground: 0x50FF64, accent: 0x50FF64, isDark: true)
+        case .blackAndWhite: .init(background: 0xFFFFFF, foreground: 0x000000, accent: 0x000000, isDark: false)
+        }
+    }
 
     /// CSS background color string, or nil for system theme.
-    var cssBackground: String? {
-        switch self {
-        case .system: nil
-        case .light: "#ffffff"
-        case .dark: "#1c1c1e"
-        case .oled: "#000000"
-        case .sepia: "#f5e6c8"
-        }
-    }
+    nonisolated var cssBackground: String? { palette?.backgroundCSS }
 
     /// CSS foreground (text) color string, or nil for system theme.
-    var cssForeground: String? {
-        switch self {
-        case .system: nil
-        case .light: "#000000"
-        case .dark: "#e5e5e7"
-        case .oled: "#e5e5e7"
-        case .sepia: "#3b2e1a"
-        }
-    }
+    nonisolated var cssForeground: String? { palette?.foregroundCSS }
+
+    /// CSS accent color used for links and other interactive text.
+    nonisolated var cssAccent: String? { palette?.accentCSS }
 
     /// SwiftUI background Color, or nil for system theme.
-    var swiftUIBackground: Color? {
-        switch self {
-        case .system: nil
-        case .light: Color.white
-        case .dark: Color(red: 0.11, green: 0.11, blue: 0.12)
-        case .oled: Color.black
-        case .sepia: Color(red: 0.96, green: 0.90, blue: 0.78)
-        }
-    }
+    nonisolated var swiftUIBackground: Color? { palette?.backgroundColor }
 
     /// SwiftUI ColorScheme override, or nil for system theme.
-    var preferredColorScheme: ColorScheme? {
-        switch self {
-        case .system: nil
-        case .light: .light
-        case .dark, .oled: .dark
-        case .sepia: .light
-        }
-    }
+    nonisolated var preferredColorScheme: ColorScheme? { palette.map { $0.isDark ? .dark : .light } }
 
     /// SwiftUI foreground Color, or nil for system theme.
-    var swiftUIForeground: Color? {
-        switch self {
-        case .system: nil
-        case .light: Color.black
-        case .dark: Color(red: 0.90, green: 0.90, blue: 0.91)
-        case .oled: Color(red: 0.90, green: 0.90, blue: 0.91)
-        case .sepia: Color(red: 0.23, green: 0.18, blue: 0.10)
-        }
+    nonisolated var swiftUIForeground: Color? { palette?.foregroundColor }
+}
+
+private struct ReaderThemePalette {
+    let background: UInt32
+    let foreground: UInt32
+    let accent: UInt32
+    let isDark: Bool
+
+    nonisolated init(background: UInt32, foreground: UInt32, accent: UInt32, isDark: Bool) {
+        self.background = background
+        self.foreground = foreground
+        self.accent = accent
+        self.isDark = isDark
+    }
+
+    nonisolated var backgroundCSS: String { Self.css(background) }
+    nonisolated var foregroundCSS: String { Self.css(foreground) }
+    nonisolated var accentCSS: String { Self.css(accent) }
+    nonisolated var backgroundColor: Color { Self.color(background) }
+    nonisolated var foregroundColor: Color { Self.color(foreground) }
+
+    nonisolated private static func css(_ value: UInt32) -> String {
+        String(format: "#%06x", value)
+    }
+
+    nonisolated private static func color(_ value: UInt32) -> Color {
+        Color(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
     }
 }
 

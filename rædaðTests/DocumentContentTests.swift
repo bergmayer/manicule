@@ -1,7 +1,7 @@
 import XCTest
 import UniformTypeIdentifiers
 import ZIPFoundation
-@testable import rædað
+@testable import Manicule
 
 @MainActor
 final class DocumentContentTests: XCTestCase {

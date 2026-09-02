@@ -1,6 +1,6 @@
 #if os(iOS) || os(visionOS)
 import XCTest
-@testable import rædað
+@testable import Manicule
 
 final class TextProcessingTests: XCTestCase {
 

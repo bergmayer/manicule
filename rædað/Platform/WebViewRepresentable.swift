@@ -68,6 +68,29 @@ struct WebViewContent: Equatable {
 /// - `epub-local://bundle/<path>` — app bundle Resources directory
 /// - `epub-local://book/<path>` — EPUB file for foliate-js to fetch
 final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
+    nonisolated private static let mimeTypes: [String: String] = [
+        "html": "text/html", "htm": "text/html",
+        "xhtml": "application/xhtml+xml",
+        "css": "text/css",
+        "js": "application/javascript", "mjs": "application/javascript",
+        "json": "application/json",
+        "png": "image/png",
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "svg": "image/svg+xml",
+        "webp": "image/webp",
+        "avif": "image/avif",
+        "bmp": "image/bmp",
+        "tif": "image/tiff", "tiff": "image/tiff",
+        "woff": "font/woff", "woff2": "font/woff2",
+        "ttf": "font/ttf", "otf": "font/otf",
+        "xml": "application/xml",
+        "mp3": "audio/mpeg", "m4a": "audio/mp4",
+        "wav": "audio/wav", "ogg": "audio/ogg",
+        "mp4": "video/mp4", "m4v": "video/mp4", "webm": "video/webm",
+        "epub": "application/epub+zip",
+    ]
+
     var baseURL: URL
     var documentResourceURL: URL?
     var bundleResourceURL: URL?
@@ -197,7 +220,7 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// Resolves a URL below `root`, rejecting dot components, absolute paths,
     /// NULs, and symlinks that escape the allowed directory.
-    static func resolvedFile(relativePath: String, under root: URL) -> URL? {
+    nonisolated static func resolvedFile(relativePath: String, under root: URL) -> URL? {
         guard !relativePath.isEmpty,
               !relativePath.hasPrefix("/"),
               !relativePath.contains("\0") else { return nil }
@@ -209,7 +232,7 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         return isContained(candidate, under: root) ? candidate : nil
     }
 
-    static func isContained(_ fileURL: URL, under root: URL) -> Bool {
+    nonisolated static func isContained(_ fileURL: URL, under root: URL) -> Bool {
         let resolvedRoot = resolvingSymlinksThroughExistingAncestor(root)
         let resolvedFile = resolvingSymlinksThroughExistingAncestor(fileURL)
         let rootPath = resolvedRoot.path
@@ -219,7 +242,7 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     /// `URL.resolvingSymlinksInPath()` stops short when the leaf does not yet
     /// exist. Resolve the nearest existing ancestor first, then append any
     /// missing suffix, so an intermediate symlink cannot disguise an escape.
-    private static func resolvingSymlinksThroughExistingAncestor(_ url: URL) -> URL {
+    nonisolated private static func resolvingSymlinksThroughExistingAncestor(_ url: URL) -> URL {
         var existing = url.standardizedFileURL
         var suffix: [String] = []
         while existing.path != "/",
@@ -253,35 +276,8 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         task.didFinish()
     }
 
-    static func mimeType(for ext: String) -> String {
-        switch ext.lowercased() {
-        case "html", "htm": return "text/html"
-        case "xhtml": return "application/xhtml+xml"
-        case "css": return "text/css"
-        case "js", "mjs": return "application/javascript"
-        case "json": return "application/json"
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "svg": return "image/svg+xml"
-        case "webp": return "image/webp"
-        case "avif": return "image/avif"
-        case "bmp": return "image/bmp"
-        case "tif", "tiff": return "image/tiff"
-        case "woff": return "font/woff"
-        case "woff2": return "font/woff2"
-        case "ttf": return "font/ttf"
-        case "otf": return "font/otf"
-        case "xml": return "application/xml"
-        case "mp3": return "audio/mpeg"
-        case "m4a": return "audio/mp4"
-        case "wav": return "audio/wav"
-        case "ogg": return "audio/ogg"
-        case "mp4", "m4v": return "video/mp4"
-        case "webm": return "video/webm"
-        case "epub": return "application/epub+zip"
-        default: return "application/octet-stream"
-        }
+    nonisolated static func mimeType(for ext: String) -> String {
+        mimeTypes[ext.lowercased()] ?? "application/octet-stream"
     }
 }
 
@@ -845,7 +841,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer === fingerPanRecognizer {
             guard isEPub, epubFlowMode != "paginated" else { return false }
-            let pan = gestureRecognizer as! UIPanGestureRecognizer
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
             let velocity = pan.velocity(in: pan.view)
             return abs(velocity.x) > abs(velocity.y)
         }
