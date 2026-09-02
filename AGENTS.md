@@ -4,7 +4,7 @@ Cross-platform (macOS, iOS, visionOS) ePub/PDF/Comic/Text reader app built with 
 
 ## Build & Run
 
-Standard Xcode project. Open `rædað.xcodeproj`, select a scheme and destination, build and run.
+Standard Xcode project. Open `Manicule.xcodeproj`, select a scheme and destination, build and run.
 
 ## App Store Connect Tools
 

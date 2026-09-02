@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="rædað/Assets.xcassets/AppIcon.appiconset/icon_1024x1024.png" width="192" alt="Manicule app icon">
+  <img src="manicule-icon.png" width="192" alt="Manicule app icon">
 </p>
 
 # Manicule
@@ -30,11 +30,11 @@ There is also a built-in narration feature on iOS/iPad where the app will use bu
 
 ## Building
 
-Open `rædað.xcodeproj` in Xcode and install it on your devices.  I don't want to put this in the app store since I don't want to provide tech support; that said, it's sort of annoying that an app with this exact feature set is not already in the app store.  In fact I think Apple's Preview should just have most of these features.  On Apple devices by default if you try to open a DRM-free ebook it copies it over into Apple Books.  Stupid!
+Open `Manicule.xcodeproj` in Xcode and install it on your devices.  I don't want to put this in the app store since I don't want to provide tech support; that said, it's sort of annoying that an app with this exact feature set is not already in the app store.  In fact I think Apple's Preview should just have most of these features.  On Apple devices by default if you try to open a DRM-free ebook it copies it over into Apple Books.  Stupid!
 
 ## Third-party code
 
-ePub rendering uses [foliate-js](https://github.com/johnfactotum/foliate-js) by John Factotum, vendored in `rædað/Resources/foliate-js/`. It handles ePub parsing, pagination, CFI-based navigation, and search. MIT licensed; see `rædað/Resources/foliate-js/LICENSE`.
+ePub rendering uses [foliate-js](https://github.com/johnfactotum/foliate-js) by John Factotum, vendored in `Manicule/Resources/foliate-js/`. It handles ePub parsing, pagination, CFI-based navigation, and search. MIT licensed; see `Manicule/Resources/foliate-js/LICENSE`.
 
 Swift package dependencies, resolved by Xcode:
 

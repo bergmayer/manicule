@@ -87,8 +87,8 @@ The extension's Info.plist needs these keys:
       QLSupportsSearchableItems: false  (unless you need Spotlight indexing)
 
 NSExtensionPrincipalClass MUST be module-qualified. If your module is
-"raedad_look" and your class is "PreviewProvider", the value is
-"raedad_look.PreviewProvider". Get this wrong and the extension silently
+"ManiculeQuickLook" and your class is "PreviewProvider", the value is
+"ManiculeQuickLook.PreviewProvider". Get this wrong and the extension silently
 fails to load.
 
 QLSupportedContentTypes is the most important and most error-prone key.

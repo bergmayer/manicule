@@ -1,5 +1,5 @@
 {
-  "name": "rædað-backend",
+  "name": "manicule-backend",
   "version": "1.0.0",
   "scripts": {
     "generate": "teeny generate --local",
