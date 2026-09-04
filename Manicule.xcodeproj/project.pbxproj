@@ -15,7 +15,6 @@
 		311F14252F4DF513007FDDEA /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 311F14262F4DF513007FDDEA /* ZIPFoundation */; };
 		3154DF642F4E19A3007EAE24 /* Unrar in Frameworks */ = {isa = PBXBuildFile; productRef = 3154DF632F4E19A3007EAE24 /* Unrar */; };
 		3154DF652F4E19A4007EAE24 /* Unrar in Frameworks */ = {isa = PBXBuildFile; productRef = 3154DF662F4E19A4007EAE24 /* Unrar */; };
-		31A5B0102F500010007FDDEA /* ManiculeShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 31A5B0012F500001007FDDEA /* ManiculeShare.appex */; platformFilter = ios; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		6B795DB28BC5C1DA2FE1E68D /* TextProcessingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BAB47EEDBD8241A926916D7 /* TextProcessingTests.swift */; };
 		8AD0C8D7185EB5BA96376470 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 506139AD1A033D19D7B0CC3A /* Foundation.framework */; };
 		A479CD66F7EDC749C1E2AADD /* ReadingPositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E41D3C4658FCB8D24B7F668 /* ReadingPositionTests.swift */; };
@@ -35,13 +34,6 @@
 			remoteGlobalIDString = 311F14002F4DF17F007FDDEA;
 			remoteInfo = "ManiculeQuickLook";
 		};
-		31A5B00E2F50000E007FDDEA /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 311F13B42F4DE7BF007FDDEA /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 31A5B0002F500000007FDDEA;
-			remoteInfo = "ManiculeShare";
-		};
 		F2F959C3752A4CA39FA79B80 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 311F13B42F4DE7BF007FDDEA /* Project object */;
@@ -59,7 +51,6 @@
 			dstSubfolderSpec = 13;
 			files = (
 				311F14102F4DF17F007FDDEA /* ManiculeQuickLook.appex in Embed Foundation Extensions */,
-				31A5B0102F500010007FDDEA /* ManiculeShare.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -73,7 +64,6 @@
 		311F14032F4DF17F007FDDEA /* QuickLook.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuickLook.framework; path = System/Library/Frameworks/QuickLook.framework; sourceTree = SDKROOT; };
 		3154DE612F4E0844007EAE24 /* Manicule.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Manicule.entitlements"; sourceTree = "<group>"; };
 		3154DE622F4E0844007EAE25 /* Manicule-macOS-Local.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Manicule-macOS-Local.entitlements"; sourceTree = "<group>"; };
-		31A5B0012F500001007FDDEA /* ManiculeShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "ManiculeShare.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		31A5B0302F500030007FDDEA /* Manicule-macOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Manicule-macOS.entitlements"; sourceTree = "<group>"; };
 		506139AD1A033D19D7B0CC3A /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		5E41D3C4658FCB8D24B7F668 /* ReadingPositionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ReadingPositionTests.swift; path = "ManiculeTests/ReadingPositionTests.swift"; sourceTree = "<group>"; };
@@ -103,13 +93,6 @@
 			);
 			target = 311F13BB2F4DE7BF007FDDEA /* Manicule */;
 		};
-		31A5B0242F500024007FDDEA /* Exceptions for "ManiculeShare" folder in "ManiculeShare" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 31A5B0002F500000007FDDEA /* ManiculeShare */;
-		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -127,14 +110,6 @@
 				311F14242F4DF513007FDDEA /* Exceptions for "ManiculeQuickLook" folder in "ManiculeQuickLook" target */,
 			);
 			path = "ManiculeQuickLook";
-			sourceTree = "<group>";
-		};
-		31A5B0052F500005007FDDEA /* ManiculeShare */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				31A5B0242F500024007FDDEA /* Exceptions for "ManiculeShare" folder in "ManiculeShare" target */,
-			);
-			path = "ManiculeShare";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -159,13 +134,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		31A5B00A2F50000A007FDDEA /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		D7FB58C730B7909B056AED93 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -183,7 +151,6 @@
 				A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */,
 				311F13BE2F4DE7BF007FDDEA /* Manicule */,
 				311F14052F4DF17F007FDDEA /* ManiculeQuickLook */,
-				31A5B0052F500005007FDDEA /* ManiculeShare */,
 				311F14022F4DF17F007FDDEA /* Frameworks */,
 				311F13BD2F4DE7BF007FDDEA /* Products */,
 				3154DE612F4E0844007EAE24 /* Manicule.entitlements */,
@@ -199,7 +166,6 @@
 			children = (
 				311F13BC2F4DE7BF007FDDEA /* Manicule.app */,
 				311F14012F4DF17F007FDDEA /* ManiculeQuickLook.appex */,
-				31A5B0012F500001007FDDEA /* ManiculeShare.appex */,
 				F401D3A3C8F6802799E4ECF1 /* ManiculeTests.xctest */,
 			);
 			name = Products;
@@ -261,7 +227,6 @@
 			);
 			dependencies = (
 				311F140F2F4DF17F007FDDEA /* PBXTargetDependency */,
-				31A5B00F2F50000F007FDDEA /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				311F13BE2F4DE7BF007FDDEA /* Manicule */,
@@ -299,26 +264,6 @@
 			productReference = 311F14012F4DF17F007FDDEA /* ManiculeQuickLook.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
-		31A5B0002F500000007FDDEA /* ManiculeShare */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 31A5B0122F500012007FDDEA /* Build configuration list for PBXNativeTarget "ManiculeShare" */;
-			buildPhases = (
-				31A5B0092F500009007FDDEA /* Sources */,
-				31A5B00A2F50000A007FDDEA /* Frameworks */,
-				31A5B00B2F50000B007FDDEA /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				31A5B0052F500005007FDDEA /* ManiculeShare */,
-			);
-			name = "ManiculeShare";
-			productName = "ManiculeShare";
-			productReference = 31A5B0012F500001007FDDEA /* ManiculeShare.appex */;
-			productType = "com.apple.product-type.app-extension";
-		};
 		9630350333FBF7D93EED9F4E /* ManiculeTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F09379CF5CE649B3F3C830DB /* Build configuration list for PBXNativeTarget "ManiculeTests" */;
@@ -353,9 +298,6 @@
 					311F14002F4DF17F007FDDEA = {
 						CreatedOnToolsVersion = 26.4;
 					};
-					31A5B0002F500000007FDDEA = {
-						CreatedOnToolsVersion = 26.4;
-					};
 				};
 			};
 			buildConfigurationList = 311F13B72F4DE7BF007FDDEA /* Build configuration list for PBXProject "Manicule" */;
@@ -378,7 +320,6 @@
 			targets = (
 				311F13BB2F4DE7BF007FDDEA /* Manicule */,
 				311F14002F4DF17F007FDDEA /* ManiculeQuickLook */,
-				31A5B0002F500000007FDDEA /* ManiculeShare */,
 				9630350333FBF7D93EED9F4E /* ManiculeTests */,
 			);
 		};
@@ -393,13 +334,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		311F13FF2F4DF17F007FDDEA /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		31A5B00B2F50000B007FDDEA /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -431,13 +365,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		31A5B0092F500009007FDDEA /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		79C9230B7EED76724DB72BD5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -461,12 +388,6 @@
 			isa = PBXTargetDependency;
 			target = 311F14002F4DF17F007FDDEA /* ManiculeQuickLook */;
 			targetProxy = 311F140E2F4DF17F007FDDEA /* PBXContainerItemProxy */;
-		};
-		31A5B00F2F50000F007FDDEA /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			platformFilter = ios;
-			target = 31A5B0002F500000007FDDEA /* ManiculeShare */;
-			targetProxy = 31A5B00E2F50000E007FDDEA /* PBXContainerItemProxy */;
 		};
 		64F246BE4AF1D29182DFB066 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -788,75 +709,6 @@
 			};
 			name = Release;
 		};
-		31A5B0132F500013007FDDEA /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = "ManiculeShare/ManiculeShare.entitlements";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = 2T9LB27UWT;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "ManiculeShare/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "ManiculeShare";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.palefire.manicule.share";
-				PRODUCT_MODULE_NAME = ManiculeShare;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		31A5B0142F500014007FDDEA /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = "ManiculeShare/ManiculeShare.entitlements";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = 2T9LB27UWT;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "ManiculeShare/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "ManiculeShare";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.palefire.manicule.share";
-				PRODUCT_MODULE_NAME = ManiculeShare;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
 		4FF58FBB32C886B449475362 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -918,15 +770,6 @@
 			buildConfigurations = (
 				311F14132F4DF17F007FDDEA /* Debug */,
 				311F14142F4DF17F007FDDEA /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		31A5B0122F500012007FDDEA /* Build configuration list for PBXNativeTarget "ManiculeShare" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				31A5B0132F500013007FDDEA /* Debug */,
-				31A5B0142F500014007FDDEA /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

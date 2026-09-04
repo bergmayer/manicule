@@ -6,8 +6,6 @@ import os.log
 
 private let browserLog = Logger(subsystem: "com.palefire.manicule", category: "Browser")
 
-private let sharedGroupID = "group.com.palefire.manicule"
-
 /// Holds a successfully opened document and its source URL.
 struct OpenedDocument: Equatable {
     let document: ReaderDocument
@@ -28,8 +26,6 @@ struct IOSRootView: View {
     @State private var showSettings: Bool = false
     @State private var isOpening: Bool = false
     @State private var activeOpenRequestID: UUID?
-    @Environment(\.scenePhase) private var scenePhase
-
     var body: some View {
         Group {
             if let opened = openedDocument {
@@ -54,13 +50,6 @@ struct IOSRootView: View {
             browserLog.info("onOpenURL: \(url.absoluteString, privacy: .public)")
             if url.scheme == "manicule" {
                 if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-                    if url.host == "shared",
-                       let urlParam = components.queryItems?.first(where: { $0.name == "url" })?.value,
-                       let fileURL = URL(string: urlParam) {
-                        clearPendingSharedFile()
-                        beginOpeningDocument(at: fileURL)
-                        return
-                    }
                     let filename = components.queryItems?.first(where: { $0.name == "file" })?.value ?? ""
                     NotificationCenter.default.post(
                         name: .openFromQLPreview,
@@ -71,9 +60,6 @@ struct IOSRootView: View {
             } else if url.isFileURL {
                 beginOpeningDocument(at: url)
             }
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { checkForPendingSharedFile() }
         }
         .alert("Unable to Open File", isPresented: $showError) {
             Button("OK") { }
@@ -350,23 +336,6 @@ struct IOSRootView: View {
         openedDocument = nil
     }
 
-    private func checkForPendingSharedFile() {
-        guard openedDocument == nil else { return }
-        let sharedDefaults = UserDefaults(suiteName: sharedGroupID)
-        guard let pendingPath = sharedDefaults?.string(forKey: "pendingSharedFile") else { return }
-        let fileURL = URL(fileURLWithPath: pendingPath)
-        guard FileManager.default.fileExists(atPath: pendingPath) else {
-            clearPendingSharedFile()
-            return
-        }
-        clearPendingSharedFile()
-        beginOpeningDocument(at: fileURL)
-    }
-
-    private func clearPendingSharedFile() {
-        let sharedDefaults = UserDefaults(suiteName: sharedGroupID)
-        sharedDefaults?.removeObject(forKey: "pendingSharedFile")
-    }
 }
 
 // MARK: - Settings
