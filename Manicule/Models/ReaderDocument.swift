@@ -78,10 +78,36 @@ struct ReaderDocument: FileDocument {
     let fileHash: String
 
     /// Direct initializer for manual document construction (e.g. from security-scoped file access).
-    init(content: DocumentContent, rawData: Data, fileHash: String? = nil) {
+    nonisolated init(content: DocumentContent, rawData: Data, fileHash: String? = nil) {
         self.content = content
         self.rawData = rawData
         self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
+    }
+
+    /// Read a provider-coordinated snapshot. The caller owns security access
+    /// and runs this synchronous I/O and parsing away from the main actor.
+    nonisolated static func read(from url: URL, expectedHash: String? = nil) throws -> ReaderDocument {
+        try Task.checkCancellation()
+        var snapshot: Result<Data, Error>?
+        var coordinationError: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            snapshot = Result { try Data(contentsOf: coordinatedURL) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let snapshot else { throw DocumentError.unreadable }
+        let data = try snapshot.get()
+        try Task.checkCancellation()
+        let hash = FileHasher.hash(data: data)
+        if let expectedHash, expectedHash != hash, expectedHash != FileHasher.legacyHash(data: data) {
+            throw DocumentError.differentDocument
+        }
+        let content = try DocumentContent.parse(
+            data: data,
+            contentType: UTType(filenameExtension: url.pathExtension) ?? .data,
+            filename: url.lastPathComponent
+        )
+        try Task.checkCancellation()
+        return ReaderDocument(content: content, rawData: data, fileHash: hash)
     }
 
     nonisolated init(configuration: ReadConfiguration) throws {
@@ -110,5 +136,21 @@ struct ReaderDocument: FileDocument {
     // Required by protocol but never called for a viewing-only DocumentGroup.
     nonisolated func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         throw DocumentError.notWritable
+    }
+}
+
+/// Immutable ownership of one balanced security-scope acquisition. Copies of
+/// a reader session or an in-flight operation retain access until both finish.
+final class SecurityScopedFile: Sendable {
+    let url: URL
+    private let accessing: Bool
+
+    nonisolated init(url: URL) {
+        self.url = url
+        accessing = url.startAccessingSecurityScopedResource()
+    }
+
+    nonisolated deinit {
+        if accessing { url.stopAccessingSecurityScopedResource() }
     }
 }

@@ -1,10 +1,79 @@
 import XCTest
 import UniformTypeIdentifiers
 import ZIPFoundation
+import PDFKit
+import CoreText
+import ImageIO
 @testable import Manicule
 
 @MainActor
 final class DocumentContentTests: XCTestCase {
+
+    func testPDFRendererProducesThumbnailFromSnapshotAndRejectsInvalidPages() async throws {
+        let renderer = PDFPageRenderer(data: Self.minimalPDF, fileHash: "test-pdf")
+        let rendered = await renderer.thumbnail(at: 0, width: 160)
+        let image = try XCTUnwrap(rendered)
+        XCTAssertEqual(Double(image.width) / Double(image.height), 612.0 / 792.0, accuracy: 0.02)
+        let missing = await renderer.thumbnail(at: 1, width: 160)
+        let negative = await renderer.thumbnail(at: -1, width: 160)
+        XCTAssertNil(missing)
+        XCTAssertNil(negative)
+    }
+
+    func testCoordinatedReadPreservesSourceAndSnapshotAfterReplacement() async throws {
+        let original = Data("Café 👋 — original".utf8)
+        let directory = try TemporaryDirectoryLease.writing(original, filename: "book.txt")
+        let url = directory.url.appendingPathComponent("book.txt")
+        let document = try await Task.detached { try ReaderDocument.read(from: url) }.value
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        try Data("replacement".utf8).write(to: url, options: .atomic)
+        XCTAssertEqual(document.rawData, original)
+        XCTAssertEqual(document.fileHash, FileHasher.hash(data: original))
+        guard case .plainText(let text) = document.content else { return XCTFail("Expected text") }
+        XCTAssertEqual(text, "Café 👋 — original")
+    }
+
+    func testCoordinatedReadReportsMissingFile() async throws {
+        let directory = try TemporaryDirectoryLease.create(prefix: "manicule-test")
+        let url = directory.url.appendingPathComponent("missing.txt")
+        do {
+            _ = try await Task.detached { try ReaderDocument.read(from: url) }.value
+            XCTFail("Missing file must fail")
+        } catch {
+            XCTAssertFalse(error is CancellationError)
+        }
+    }
+
+    func testCancelledReadDoesNotPublishADocument() async throws {
+        let directory = try TemporaryDirectoryLease.writing(Data("text".utf8), filename: "book.txt")
+        let url = directory.url.appendingPathComponent("book.txt")
+        let task = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try ReaderDocument.read(from: url)
+        }
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled read must fail")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testRenderWorkspaceIsUniqueAndRemovedAfterRelease() throws {
+        let data = Data("<p>Rendered text</p>".utf8)
+        var first: TemporaryDirectoryLease? = try .writing(data, filename: "content.html")
+        let firstURL = try XCTUnwrap(first?.url)
+        let second = try TemporaryDirectoryLease.writing(data, filename: "content.html")
+        XCTAssertNotEqual(firstURL, second.url)
+        XCTAssertEqual(try Data(contentsOf: firstURL.appendingPathComponent("content.html")), data)
+        first = nil
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.url.path))
+    }
+
+    func testRenderWorkspaceDoesNotPublishFailedWrite() {
+        XCTAssertThrowsError(try TemporaryDirectoryLease.writing(Data(), filename: "missing/content.html"))
+    }
 
     // MARK: - PDF Detection
 
@@ -206,7 +275,7 @@ final class DocumentContentTests: XCTestCase {
     // MARK: - Fixtures
 
     /// Minimal valid PDF (1 page, no content).
-    private static let minimalPDF: Data = {
+    static let minimalPDF: Data = {
         let pdf = """
         %PDF-1.0
         1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
@@ -276,7 +345,7 @@ final class DocumentContentTests: XCTestCase {
     }
 
     /// Creates a minimal CBZ (ZIP containing one small PNG).
-    private static func minimalCBZ() throws -> Data {
+    static func minimalCBZ() throws -> Data {
         let archive = try Archive(accessMode: .create)
         let png = Self.onePxPNG
         try archive.addEntry(with: "page001.png",
@@ -344,24 +413,143 @@ final class DocumentContentTests: XCTestCase {
                              provider: { position, size in data })
     }
 
-    /// 1x1 red PNG image.
-    private static let onePxPNG: Data = {
-        var d = Data()
-        // PNG signature
-        d.append(contentsOf: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
-        // IHDR chunk (1x1, 8-bit RGB)
-        let ihdr: [UInt8] = [0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-                             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                             0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE]
-        d.append(contentsOf: ihdr)
-        // IDAT chunk (raw red pixel via zlib)
-        let idat: [UInt8] = [0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
-                             0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00,
-                             0x00, 0x03, 0x00, 0x01, 0x36, 0x28, 0x19, 0x00]
-        d.append(contentsOf: idat)
-        // IEND chunk
-        let iend: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]
-        d.append(contentsOf: iend)
-        return d
-    }()
+    /// Deterministic valid PNG, shared by ZIP and stored-RAR fixtures.
+    static let onePxPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")!
+
+    /// Two original PNG pages in an uncompressed RAR4 archive, with valid CRCs.
+    static let minimalCBR = Data(base64Encoded: "UmFyIRoHAM+QcwAADQAAAAAAAADhqnQAgCoARQAAAEUAAAADUQ/aAgAAAAAUMAoApIEAAHBhZ2UxMC5wbmeJUE5HDQoaCgAAAA1JSERSAAAAAQAAAAEIAgAAAJB3U94AAAAMSURBVHicY/jPwAAAAwEBAMn+ku8AAAAASUVORK5CYIKppnQAgCkARQAAAEUAAAADUQ/aAgAAAAAUMAkApIEAAHBhZ2UyLnBuZ4lQTkcNChoKAAAADUlIRFIAAAABAAAAAQgCAAAAkHdT3gAAAAxJREFUeJxj+M/AAAADAQEAyf6S7wAAAABJRU5ErkJggsQ9ewBABwA=")!
+}
+
+@MainActor
+final class ReaderFailureTests: XCTestCase {
+    func testStoredRARExtractsInNaturalOrderAndRejectsCorruption() throws {
+        let archive = try ComicArchiveParser.parseRAR(data: DocumentContentTests.minimalCBR)
+        XCTAssertEqual(archive.pages.map(\.lastPathComponent), ["page2.png", "page10.png"])
+        for page in archive.pages { XCTAssertEqual(try Data(contentsOf: page), DocumentContentTests.onePxPNG) }
+        var broken = DocumentContentTests.minimalCBR
+        broken[80] ^= 0xff
+        XCTAssertThrowsError(try ComicArchiveParser.parseRAR(data: broken))
+    }
+
+    func testRenamedZIPComicStillOpensAsCBR() throws {
+        let archive = try ComicArchiveParser.parseRAR(data: DocumentContentTests.minimalCBZ())
+        XCTAssertEqual(archive.pageCount, 1)
+    }
+
+    static func image(text: String) throws -> Data {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 1200, height: 900, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 1200, height: 900))
+        draw(text, in: context)
+        let image = try XCTUnwrap(context.makeImage())
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
+    static func pdf(text: String, pages: Int = 2) throws -> Data {
+        let data = NSMutableData()
+        let consumer = try XCTUnwrap(CGDataConsumer(data: data))
+        var bounds = CGRect(x: 0, y: 0, width: 1200, height: 900)
+        let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &bounds, nil))
+        for _ in 0..<pages {
+            context.beginPDFPage(nil)
+            draw(text, in: context)
+            context.endPDFPage()
+        }
+        context.closePDF()
+        return data as Data
+    }
+
+    private static func draw(_ text: String, in context: CGContext) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 48, nil),
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0, alpha: 1)
+        ]
+        context.textPosition = CGPoint(x: 50, y: 450)
+        CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes)), context)
+    }
+
+    func testPDFSearchTransfersRangesForEveryMatch() async throws {
+        let bytes = try Self.pdf(text: "Café searchable text")
+        let renderer = PDFPageRenderer(data: bytes, fileHash: "pdf-search-test")
+        let matches = try await renderer.search("searchable")
+        XCTAssertEqual(matches.count, 2)
+        let display = try XCTUnwrap(PDFDocument(data: bytes))
+        for (index, ranges) in matches.enumerated() {
+            let range = try XCTUnwrap(ranges.first)
+            XCTAssertEqual(range.pageIndex, index)
+            XCTAssertEqual(display.page(at: index)?.selection(for: range.range)?.string, "searchable")
+        }
+    }
+
+    func testOCRRecognizesOwnedImageFixture() async throws {
+        let directory = try TemporaryDirectoryLease.writing(Self.image(text: "Manicule searchable page"), filename: "page.png")
+        let results = try await OCRService.shared.recognizeText(in: directory.url.appendingPathComponent("page.png"))
+        XCTAssertTrue(results.contains { $0.text.localizedCaseInsensitiveContains("searchable") })
+    }
+
+    func testOCRDistinguishesUnreadableImageFromBlankImage() async throws {
+        let directory = try TemporaryDirectoryLease.writing(Data("not an image".utf8), filename: "broken.png")
+        do {
+            _ = try await OCRService.shared.recognizeText(in: directory.url.appendingPathComponent("broken.png"))
+            XCTFail("Unreadable image must fail, not return zero search results")
+        } catch { XCTAssertFalse(error is CancellationError) }
+        let valid = try TemporaryDirectoryLease.writing(Self.image(text: ""), filename: "blank.png")
+        let results = try await OCRService.shared.recognizeText(in: valid.url.appendingPathComponent("blank.png"))
+        XCTAssertTrue(results.isEmpty)
+    }
+}
+
+@MainActor
+final class FileChangeObservationTests: XCTestCase {
+    func testCoordinatedExternalReplacementNotifiesAndPresenterIsReleased() async throws {
+        let directory = try TemporaryDirectoryLease.writing(Data("original".utf8), filename: "source.txt")
+        let url = directory.url.appendingPathComponent("source.txt")
+        let observation = FileChangeObservation(url: url)
+        defer { observation.stop() }
+        let received = expectation(description: "Source change observed")
+        let listener = Task {
+            for await changedURL in observation.changes {
+                XCTAssertEqual(changedURL, url)
+                received.fulfill()
+                break
+            }
+        }
+        defer { listener.cancel() }
+        try await Task.detached {
+            var coordinationError: NSError?
+            var writeError: Error?
+            NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { target in
+                do { try Data("replacement".utf8).write(to: target, options: .atomic) }
+                catch { writeError = error }
+            }
+            if let error = coordinationError ?? writeError { throw error }
+        }.value
+        await fulfillment(of: [received], timeout: 5)
+        observation.stop()
+        XCTAssertFalse(NSFileCoordinator.filePresenters.contains { $0 === observation })
+    }
+}
+
+@MainActor
+final class SavedFileIdentityTests: XCTestCase {
+    func testMovedBookMatchesButSamePathReplacementIsRejected() throws {
+        let directory = try TemporaryDirectoryLease.writing(Data("Original Café 👋".utf8), filename: "Book.txt")
+        let original = directory.url.appendingPathComponent("Book.txt")
+        let hash = FileHasher.hash(data: try Data(contentsOf: original))
+        let moved = directory.url.appendingPathComponent("Renamed.txt")
+        try FileManager.default.moveItem(at: original, to: moved)
+        XCTAssertEqual(try ReaderDocument.read(from: moved, expectedHash: hash).fileHash, hash)
+        try Data("A different book".utf8).write(to: moved, options: .atomic)
+        XCTAssertThrowsError(try ReaderDocument.read(from: moved, expectedHash: hash)) { error in
+            guard case DocumentError.differentDocument = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        // Deliberate new-file opening still accepts the changed content.
+        XCTAssertNotEqual(try ReaderDocument.read(from: moved).fileHash, hash)
+        XCTAssertEqual(try Data(contentsOf: moved), Data("A different book".utf8))
+    }
 }

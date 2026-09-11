@@ -8,50 +8,52 @@ struct TextReaderView: View {
     let content: TextContent
     let fileURL: URL?
     let rawData: Data
+    @Environment(\.readingSession) private var readingSession
+    let fileHash: String
     @Binding var showChrome: Bool
     var onClose: (() -> Void)?
 
-    private let fileHash: String?
-
-    init(content: TextContent, fileURL: URL?, rawData: Data, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
-        self.content = content
-        self.fileURL = fileURL
-        self.rawData = rawData
-        self._showChrome = showChrome
-        self.onClose = onClose
-        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
+    @State private var textAnchor: TextAnchor?
+    @State private var chunkSourceLines: [Int] = []
+    private enum NativeRestoration {
+        case waitingForChunks, waitingForChunk(Int), ready
     }
-
+    @State private var nativeRestoration = NativeRestoration.waitingForChunks
+    @State private var chunkFrames: [Int: CGRect] = [:]
     @State private var scrollFraction: Double = 0.0
     @State private var currentPage: Int = 0
     @State private var totalPages: Int = 1
     @State private var showBookmarks: Bool = false
     @State private var showSettings: Bool = false
-    @State private var viewMode: ViewMode = .scrolling
-    @State private var twoUpOverride: Bool? = nil
+    private var viewMode: ViewMode { effective.viewMode }
+    private var twoUpOverride: Bool? { effective.twoUp }
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
-    @State private var htmlFileURL: URL?
-    @State private var htmlBaseURL: URL?
+    @State private var htmlDirectory: TemporaryDirectoryLease?
+    @State private var renderError: String?
+    @State private var renderAttempt = UUID()
+    private var htmlBaseURL: URL? { htmlDirectory?.url }
+    private var htmlFileURL: URL? { htmlBaseURL?.appendingPathComponent("content.html") }
     @State private var scrollTarget: Int? = nil
     @State private var cachedTextChunks: [String] = []
     @State private var renderMarkdown: Bool = false
     @State private var showTOC: Bool = false
-
-    // Auto-save debounce
-    @State private var autoSaveTimer: Timer?
 
     @State private var fastScroll = FastScrollController()
 
     // Read-aloud state (iOS only)
     #if os(iOS) || os(visionOS)
     private let readAloud = ReadAloudController.shared
+    @State private var narrationOwner = UUID()
+    private var ownsNarration: Bool { readAloud.owner == narrationOwner }
+    private var narrationIsActive: Bool { ownsNarration && readAloud.isActive }
     #endif
 
     // Search state
     @State private var search = ReaderSearchState()
-    @State private var searchMatchOffsets: [Range<String.Index>] = []
+    @State private var searchMatches: [TextSearch.Match] = []
+    @State private var searchTask: Task<Void, Never>?
     @State private var searchDebouncer = SearchDebouncer()
 
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -98,24 +100,6 @@ struct TextReaderView: View {
         }
     }
 
-    /// Lines chunked for lazy rendering in scrolling mode.
-    /// Groups of 100 lines to balance view count vs. rendering cost.
-    /// Cached in `cachedTextChunks` @State; recomputed when reflowText changes.
-    private func computeTextChunks() -> [String] {
-        let source = (effective.reflowText && !isMarkdown) ? TextReflow.reflow(rawText) : rawText
-        let lines = source.components(separatedBy: "\n")
-        let chunkSize = 100
-        var chunks: [String] = []
-        chunks.reserveCapacity((lines.count + chunkSize - 1) / chunkSize)
-        var i = 0
-        while i < lines.count {
-            let end = min(i + chunkSize, lines.count)
-            chunks.append(lines[i..<end].joined(separator: "\n"))
-            i = end
-        }
-        return chunks
-    }
-
     enum TextContent {
         case plain(String)
         case markdown(String)
@@ -157,64 +141,49 @@ struct TextReaderView: View {
         textLayoutWithToolbar
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
-                    BookmarkPickerView(fileHash: fileHash ?? "") { position in
-                        if case .textOffset(let offset) = position {
-                            let fraction = Double(offset) / 1000.0
-                            scrollFraction = fraction
-                            if isPaginated {
-                                let page = max(0, Int(round(fraction * Double(totalPages - 1))))
-                                webViewProxy.goToPage?(page)
-                            } else {
-                                let chunks = cachedTextChunks
-                                let targetIndex = min(Int(round(fraction * Double(chunks.count - 1))), chunks.count - 1)
-                                scrollTarget = targetIndex
-                            }
-                        }
+                    BookmarkPickerView(fileHash: fileHash) { position in
+                        navigateToPosition(position)
                     }
                 }
             }
             .sheet(isPresented: $showSettings) {
                 ReaderSettingsSheet(fileHash: fileHash, showReflowOption: !isMarkdown)
             }
-            .onChange(of: renderMarkdown) { _, _ in
-                prepareHTMLFile()
+            .alert("Unable to Render Text", isPresented: Binding(
+                get: { renderError != nil },
+                set: { if !$0 { renderError = nil } }
+            )) {
+                Button("Retry") { renderAttempt = UUID() }
+                Button("OK", role: .cancel) { renderError = nil }
+            } message: {
+                Text(renderError ?? "")
             }
-            .onChange(of: effective.reflowText) { _, _ in
-                cachedTextChunks = computeTextChunks()
-                prepareHTMLFile()
+            .task(id: "\(renderMarkdown)-\(effective.reflowText)-\(renderAttempt)") {
+                await prepareText()
             }
             .task {
                 ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
-                let eff = readingPrefs.effective(for: fileHash)
-                viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp
                 // Restore saved scroll fraction before WebView renders,
                 // so the initial WebViewContent gets the correct position.
-                if let hash = fileHash,
-                   let saved = bookmarkStore.savedPosition(for: hash),
-                   case .textOffset(let off) = saved.position, off > 0 {
-                    scrollFraction = Double(off) / 1000.0
+                if let saved = bookmarkStore.savedPosition(for: fileHash) {
+                    scrollFraction = saved.position.textFraction ?? 0
+                    textAnchor = saved.position.textAnchor
                 }
                 renderMarkdown = isMarkdown
-                cachedTextChunks = computeTextChunks()
-                prepareHTMLFile()
             }
             .onDisappear {
-                autoSaveTimer?.invalidate()
                 autoSavePosition()
-                if let htmlBaseURL { try? FileManager.default.removeItem(at: htmlBaseURL) }
-                htmlFileURL = nil
-                htmlBaseURL = nil
+                searchDebouncer.cancel()
+                clearTextSearch()
+                htmlDirectory = nil
                 #if os(iOS) || os(visionOS)
-                if readAloud.isActive { readAloud.dismiss() }
+                readAloud.dismiss(for: narrationOwner)
                 #endif
             }
-            .onChange(of: scrollFraction) { _, _ in
-                autoSaveTimer?.invalidate()
-                autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
-                    Task { @MainActor in autoSavePosition() }
-                }
+            .task(id: currentPosition) {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                autoSavePosition()
             }
     }
 
@@ -250,6 +219,7 @@ struct TextReaderView: View {
             .onReaderCommand(.toggleReadAloud, perform: toggleReadAloud)
             #endif
             .onChange(of: search.query) { _, newQuery in
+                clearTextSearch()
                 searchDebouncer.handle(newQuery, perform: performTextSearch, clear: clearTextSearch)
             }
     }
@@ -279,19 +249,23 @@ struct TextReaderView: View {
                                 resourceBaseURL: isMarkdown && renderMarkdown
                                     ? self.fileURL?.deletingLastPathComponent() : nil,
                                 marginsOneUp: effective.marginsOneUp,
-                                marginsTwoUp: effective.marginsTwoUp
+                                marginsTwoUp: effective.marginsTwoUp,
+                                resourceLease: htmlDirectory,
+                                textAnchor: textAnchor
                             ),
                             proxy: webViewProxy,
                             onScrollPositionChange: { fraction in
-                                scrollFraction = fraction
+                                scrollFraction = min(1, max(0, fraction.isFinite ? fraction : 0))
                             },
+                            onTextAnchorChange: { textAnchor = $0 },
                             onPageInfo: { current, total in
                                 currentPage = current
                                 totalPages = total
                             },
                             onToggleChrome: {
                                 showChrome.toggle()
-                            }
+                            },
+                            onFailure: { renderError = $0 }
                         )
                     } else {
                         scrollingTextView
@@ -344,8 +318,8 @@ struct TextReaderView: View {
                 SearchBarView(
                     query: $search.query,
                     isSearching: $search.isSearching,
-                    resultCount: searchMatchOffsets.count,
-                    currentResult: searchMatchOffsets.isEmpty ? 0 : search.currentIndex + 1,
+                    resultCount: searchMatches.count,
+                    currentResult: searchMatches.isEmpty ? 0 : search.currentIndex + 1,
                     onNext: { navigateTextSearchResult(forward: true) },
                     onPrevious: { navigateTextSearchResult(forward: false) },
                     onDismiss: { dismissTextSearch() },
@@ -368,9 +342,9 @@ struct TextReaderView: View {
         // Bottom chrome overlays (no reflow)
         .overlay(alignment: .bottom) {
             if showChrome {
-                if readAloud.isActive {
+                if narrationIsActive {
                     ReadAloudBarView(controller: readAloud) {
-                        readAloud.dismiss()
+                        readAloud.dismiss(for: narrationOwner)
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
@@ -417,9 +391,9 @@ struct TextReaderView: View {
                 }
 
                 if let onClose {
-                    if readAloud.isActive {
+                    if narrationIsActive {
                         Button {
-                            readAloud.dismiss()
+                            readAloud.dismiss(for: narrationOwner)
                         } label: {
                             Label("Done", systemImage: "speaker.wave.2.fill")
                         }
@@ -472,8 +446,8 @@ struct TextReaderView: View {
                 }
                 Section {
                     Button { toggleReadAloud() } label: {
-                        Label(readAloud.isActive ? "Stop Read Aloud" : "Read Aloud",
-                              systemImage: readAloud.isActive ? "speaker.slash" : "speaker.wave.2")
+                        Label(narrationIsActive ? "Stop Read Aloud" : "Read Aloud",
+                              systemImage: narrationIsActive ? "speaker.slash" : "speaker.wave.2")
                     }
                 }
                 Section {
@@ -504,9 +478,11 @@ struct TextReaderView: View {
                         if isPaginated {
                             let page = Int(newValue * Double(max(1, totalPages - 1)))
                             webViewProxy.goToPageImmediate?(page)
+                        } else if useWebView {
+                            webViewProxy.restoreTextScroll?(newValue)
                         } else {
                             scrollFraction = newValue
-                            scrollTarget = Int(newValue * Double(max(1, cachedTextChunks.count - 1)))
+                            scrollTarget = Int(newValue * Double(max(0, cachedTextChunks.count - 1)))
                         }
                     }
                 ),
@@ -538,9 +514,11 @@ struct TextReaderView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(index)
-                            .onAppear {
-                                guard chunks.count > 1 else { return }
-                                scrollFraction = Double(index) / Double(chunks.count - 1)
+                            .onGeometryChange(for: CGRect.self) { geometry in
+                                geometry.frame(in: .named("readerText"))
+                            } action: { frame in
+                                chunkFrames[index] = frame
+                                updateNativePosition()
                             }
                     }
                 }
@@ -548,6 +526,7 @@ struct TextReaderView: View {
                 .padding(.vertical, effective.marginsOneUp.topBottom)
                 .foregroundStyle(effective.foregroundColor ?? .primary)
             }
+            .coordinateSpace(name: "readerText")
             .background(effective.backgroundColor ?? Color.clear)
             .contentShape(Rectangle())
             .simultaneousGesture(
@@ -558,7 +537,8 @@ struct TextReaderView: View {
                 proxy.scrollTo(target, anchor: .top)
                 scrollTarget = nil
             }
-            .task {
+            .task(id: chunkSourceLines) {
+                guard !chunks.isEmpty else { return }
                 restoreScrollPosition(chunks: chunks)
             }
         }
@@ -569,7 +549,7 @@ struct TextReaderView: View {
     @ViewBuilder
     private var textSidebar: some View {
         let tocEntries = markdownTOCEntries
-        let bookmarks = bookmarkStore.bookmarks(for: fileHash ?? "")
+        let bookmarks = bookmarkStore.bookmarks(for: fileHash)
         List {
             if isMarkdown && !tocEntries.isEmpty {
                 Section("Contents") {
@@ -609,17 +589,43 @@ struct TextReaderView: View {
         .listStyle(.sidebar)
     }
 
+    private var currentPosition: ReadingPosition {
+        if let textAnchor { return .textAnchor(textAnchor, fraction: scrollFraction) }
+        return .textOffset(Int(scrollFraction * 1000))
+    }
+
     private func navigateToBookmark(_ bookmark: BookmarkEntry) {
-        guard case .textOffset(let offset) = bookmark.position else { return }
-        let fraction = Double(offset) / 1000.0
-        if isPaginated {
-            let page = max(0, Int(round(fraction * Double(totalPages - 1))))
-            webViewProxy.goToPage?(page)
+        navigateToPosition(bookmark.position)
+    }
+
+    private func navigateToPosition(_ position: ReadingPosition) {
+        guard let fraction = position.textFraction else { return }
+        scrollFraction = fraction
+        textAnchor = position.textAnchor
+        if useWebView {
+            if let anchor = textAnchor { webViewProxy.goToTextAnchor?(anchor) }
+            else if isPaginated { webViewProxy.goToPage?(Int(round(fraction * Double(max(0, totalPages - 1))))) }
+            else { webViewProxy.restoreTextScroll?(fraction) }
         } else {
-            let chunks = cachedTextChunks
-            let targetIndex = min(Int(round(fraction * Double(chunks.count - 1))), chunks.count - 1)
-            scrollTarget = targetIndex
+            let target = textAnchor.flatMap { anchor in chunkSourceLines.lastIndex(where: { $0 <= anchor.line }) }
+                ?? Int(round(fraction * Double(max(0, cachedTextChunks.count - 1))))
+            nativeRestoration = .waitingForChunk(target)
+            scrollTarget = target
         }
+    }
+
+    private func updateNativePosition() {
+        guard !useWebView,
+              let index = chunkFrames.filter({ $0.value.maxY > 0 && $0.value.minY < viewHeight })
+                .min(by: { $0.value.minY < $1.value.minY })?.key,
+              chunkSourceLines.indices.contains(index), cachedTextChunks.indices.contains(index) else { return }
+        switch nativeRestoration {
+        case .waitingForChunks: return
+        case .waitingForChunk(let target) where index != target: return
+        default: nativeRestoration = .ready
+        }
+        textAnchor = TextAnchor(line: chunkSourceLines[index], quote: String(cachedTextChunks[index].prefix(80)))
+        scrollFraction = cachedTextChunks.count > 1 ? Double(index) / Double(cachedTextChunks.count - 1) : 0
     }
 
     private func navigateToHeading(_ heading: MarkdownHeading) {
@@ -634,27 +640,12 @@ struct TextReaderView: View {
 
     /// Restore scroll position from auto-saved position or bookmark.
     private func restoreScrollPosition(chunks: [String]) {
-        let offset: Int
-        if let hash = fileHash,
-           let autoSaved = bookmarkStore.savedPosition(for: hash),
-           case .textOffset(let off) = autoSaved.position {
-            offset = off
-        } else if let mostRecent = bookmarkStore.bookmarks(for: fileHash ?? "").first,
-                  case .textOffset(let off) = mostRecent.position {
-            offset = off
+        if textAnchor != nil { navigateToPosition(currentPosition) }
+        else if let position = bookmarkStore.savedPosition(for: fileHash)?.position
+            ?? bookmarkStore.bookmarks(for: fileHash).first?.position {
+            navigateToPosition(position)
         } else {
-            return
-        }
-        let fraction = Double(offset) / 1000.0
-        if isPaginated {
-            let page = max(0, Int(round(fraction * Double(totalPages - 1))))
-            scrollFraction = fraction
-            webViewProxy.goToPage?(page)
-        } else {
-            let targetIndex = min(Int(round(fraction * Double(chunks.count - 1))), chunks.count - 1)
-            if targetIndex > 0 {
-                scrollTarget = targetIndex
-            }
+            navigateToPosition(.textOffset(0))
         }
     }
 
@@ -739,66 +730,63 @@ struct TextReaderView: View {
     // MARK: - Search
 
     private func performTextSearch(_ query: String) {
+        clearTextSearch()
         search.isSearching = true
-        let text = rawText
-        let lowered = text.lowercased()
-        let needle = query.lowercased()
-        var ranges: [Range<String.Index>] = []
-        var searchStart = lowered.startIndex
-        while let range = lowered.range(of: needle, range: searchStart..<lowered.endIndex) {
-            ranges.append(range)
-            searchStart = range.upperBound
-        }
-        searchMatchOffsets = ranges
-        search.currentIndex = 0
-        search.isSearching = false
-        if !ranges.isEmpty {
-            scrollToSearchMatch(at: 0)
+        let source = rawText
+        let reflow = effective.reflowText && !isMarkdown
+        searchTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
+                let text = reflow ? TextReflow.reflow(source) : source
+                return try TextSearch.matches(in: text, query: query)
+            }
+            do {
+                let matches = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                try Task.checkCancellation()
+                searchMatches = matches
+                search.isSearching = false
+                if !matches.isEmpty { scrollToSearchMatch(at: 0) }
+            } catch {
+                guard !Task.isCancelled else { return }
+                search.isSearching = false
+            }
         }
     }
 
     private func clearTextSearch() {
-        searchMatchOffsets = []
+        searchTask?.cancel()
+        searchTask = nil
+        searchMatches = []
         search.currentIndex = 0
         search.isSearching = false
     }
 
     private func navigateTextSearchResult(forward: Bool) {
-        guard !searchMatchOffsets.isEmpty else { return }
+        guard !searchMatches.isEmpty else { return }
         if forward {
-            search.currentIndex = (search.currentIndex + 1) % searchMatchOffsets.count
+            search.currentIndex = (search.currentIndex + 1) % searchMatches.count
         } else {
-            search.currentIndex = (search.currentIndex - 1 + searchMatchOffsets.count) % searchMatchOffsets.count
+            search.currentIndex = (search.currentIndex - 1 + searchMatches.count) % searchMatches.count
         }
         scrollToSearchMatch(at: search.currentIndex)
     }
 
     private func scrollToSearchMatch(at index: Int) {
-        guard index < searchMatchOffsets.count else { return }
-        let matchRange = searchMatchOffsets[index]
-        let text = rawText
-        let offset = text.distance(from: text.startIndex, to: matchRange.lowerBound)
-        let totalLength = text.count
-        guard totalLength > 0 else { return }
-
+        guard index < searchMatches.count else { return }
+        let match = searchMatches[index]
         if useWebView {
-            // For WebView mode, use JS window.find() or scroll by fraction
-            let fraction = Double(offset) / Double(totalLength)
-            let page = max(0, Int(round(fraction * Double(totalPages - 1))))
+            let page = max(0, Int(round(match.fraction * Double(totalPages - 1))))
             webViewProxy.goToPage?(page)
         } else {
-            // Scroll to the chunk containing this match
-            let lines = text.prefix(upTo: matchRange.lowerBound).components(separatedBy: "\n")
-            let chunkIndex = lines.count / 100
-            let chunks = cachedTextChunks
-            scrollTarget = min(chunkIndex, max(chunks.count - 1, 0))
+            scrollTarget = min(match.chunk, max(cachedTextChunks.count - 1, 0))
         }
     }
 
     private func dismissTextSearch() {
         searchDebouncer.cancel()
+        clearTextSearch()
         search.reset()
-        searchMatchOffsets = []
     }
 
     private var pageLabel: String {
@@ -809,25 +797,24 @@ struct TextReaderView: View {
     }
 
     private var isCurrentPositionBookmarked: Bool {
-        guard let hash = fileHash else { return false }
-        return bookmarkStore.isPositionBookmarked(fileHash: hash, position: .textOffset(Int(scrollFraction * 1000)))
+        return bookmarkStore.isPositionBookmarked(fileHash: fileHash, position: currentPosition)
     }
 
     private func toggleBookmark() {
-        guard let url = fileURL, let hash = fileHash else { return }
-        let position: ReadingPosition = .textOffset(Int(scrollFraction * 1000))
-        if let existing = bookmarkStore.bookmarkAt(fileHash: hash, position: position) {
+        guard let url = fileURL else { return }
+        let position = currentPosition
+        if let existing = bookmarkStore.bookmarkAt(fileHash: fileHash, position: position) {
             bookmarkStore.removeBookmark(id: existing.id)
         } else {
-            bookmarkStore.addBookmark(position, for: url, data: rawData, fileHash: hash)
+            bookmarkStore.addBookmark(position, for: url, data: rawData, fileHash: fileHash)
         }
     }
 
     private func autoSavePosition() {
         guard let url = fileURL else { return }
-        guard scrollFraction > 0 else { return }
-        let position: ReadingPosition = .textOffset(Int(scrollFraction * 1000))
-        bookmarkStore.savePosition(position, for: url, data: rawData, fileHash: fileHash)
+        guard htmlDirectory != nil else { return }
+        let position = currentPosition
+        bookmarkStore.savePosition(position, for: url, data: rawData, fileHash: fileHash, session: readingSession)
     }
 
     private func adjustFontSize(by delta: Double) {
@@ -839,25 +826,22 @@ struct TextReaderView: View {
 
 
     private func selectAutomatic() {
-        viewMode = .paginated
-        twoUpOverride = nil
+
         readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
-        viewMode = .paginated
-        twoUpOverride = false
+
         readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
     private func selectTwoPage() {
-        viewMode = .paginated
-        twoUpOverride = true
+
         readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
     private func selectScrolling() {
-        viewMode = .scrolling
+
         readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 
@@ -870,8 +854,8 @@ struct TextReaderView: View {
 
     #if os(iOS) || os(visionOS)
     private func toggleReadAloud() {
-        if readAloud.isActive {
-            readAloud.dismiss()
+        if narrationIsActive {
+            readAloud.dismiss(for: narrationOwner)
             return
         }
         let text: String
@@ -885,10 +869,11 @@ struct TextReaderView: View {
         // UTF-16 offset — ReadAloudController tracks positions in UTF-16 units.
         let startOffset = Int(scrollFraction * Double((text as NSString).length))
 
+        readAloud.claim(for: narrationOwner)
         readAloud.loadText(text, startOffset: startOffset)
         readAloud.onWordRange = { _ in }
         readAloud.onSectionFinished = { [weak readAloud] in
-            readAloud?.dismiss()
+            readAloud?.dismiss(for: narrationOwner)
         }
         readAloud.play()
     }
@@ -896,82 +881,29 @@ struct TextReaderView: View {
 
     // MARK: - HTML Generation
 
-    /// Creates a temporary HTML file for WebView display.
-    /// Uses markdown-to-HTML conversion when rendering is enabled, otherwise escaped plain text.
-    private func prepareHTMLFile() {
-        var text = rawText
-        if effective.reflowText && !isMarkdown {
-            text = TextReflow.reflow(text)
+    private func prepareText() async {
+        let text = rawText
+        let reflow = effective.reflowText && !isMarkdown
+        let markdown = isMarkdown && renderMarkdown
+        let hasFile = fileURL != nil
+        let worker = Task.detached(priority: .userInitiated) {
+            try TextPreparation.prepare(text, reflow: reflow, markdown: markdown, hasFile: hasFile)
         }
-        let bodyContent: String
-
-        if isMarkdown && renderMarkdown {
-            bodyContent = MarkdownHTMLRenderer.render(text, headingAnchorPrefix: "toc-")
-        } else {
-            let escaped = escapeHTML(text)
-            bodyContent = "<p>" + escaped
-                .replacingOccurrences(of: "\n\n", with: "</p><p>")
-                .replacingOccurrences(of: "\n", with: "<br>")
-                + "</p>"
+        do {
+            let prepared = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+            try Task.checkCancellation()
+            nativeRestoration = .waitingForChunks
+            chunkFrames = [:]
+            cachedTextChunks = prepared.chunks
+            chunkSourceLines = prepared.chunkSourceLines
+            htmlDirectory = prepared.directory
+            renderError = nil
+        } catch is CancellationError {
+        } catch {
+            guard !Task.isCancelled else { return }
+            renderError = error.localizedDescription
         }
-
-        let baseElement = isMarkdown && renderMarkdown && fileURL != nil
-            ? "<base href=\"epub-local://document/\">" : ""
-
-        let html = """
-        <!DOCTYPE html>
-        <html><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src epub-local: data: https:; font-src epub-local: data:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'">
-        \(baseElement)
-        <style>
-        body {
-            background-color: #ffffff;
-            color: #000000;
-            margin: 0;
-            padding: 16px;
-            word-wrap: break-word;
-        }
-        h1, h2, h3, h4, h5, h6 { margin-top: 1em; margin-bottom: 0.5em; }
-        h1 { font-size: 1.8em; }
-        h2 { font-size: 1.5em; }
-        h3 { font-size: 1.3em; }
-        h4 { font-size: 1.1em; }
-        pre { background: #f4f4f4; padding: 12px; border-radius: 4px; overflow-x: auto; }
-        code { font-family: 'SF Mono', Menlo, monospace; font-size: 0.9em; }
-        :not(pre) > code { background: #f0f0f0; padding: 2px 4px; border-radius: 3px; }
-        blockquote {
-            border-left: 3px solid #ccc;
-            margin: 0.5em 0;
-            padding: 0.25em 1em;
-            color: #555;
-        }
-        hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
-        img { max-width: 100%; height: auto; }
-        a { color: #0066cc; }
-        </style>
-        </head><body>\(bodyContent)</body></html>
-        """
-
-        // A fresh directory per render is load-bearing: the changed file URL is
-        // what makes the WebView reload when reflow/markdown settings change.
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("manicule-text-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("content.html")
-        try? html.write(to: file, atomically: true, encoding: .utf8)
-        let previousDir = htmlBaseURL
-        htmlFileURL = file
-        htmlBaseURL = dir
-        if let previousDir {
-            try? FileManager.default.removeItem(at: previousDir)
-        }
-    }
-
-    private func escapeHTML(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }

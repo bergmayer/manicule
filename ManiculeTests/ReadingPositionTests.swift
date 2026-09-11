@@ -137,3 +137,223 @@ final class ReadingPositionTests: XCTestCase {
         XCTAssertEqual(decoded, position, file: file, line: line)
     }
 }
+
+@MainActor
+final class ReadingSyncTests: XCTestCase {
+    private func bookmark(_ id: String) -> BookmarkEntry {
+        BookmarkEntry(id: id, fileHash: "book", fileName: "Book.epub",
+                      position: .epubCFI(id, fraction: 0.5), lastOpened: Date(timeIntervalSince1970: 100))
+    }
+
+    func testConcurrentAdditionsConvergeAndDeletionSurvivesOfflineMerge() throws {
+        var first = SyncedCollection<BookmarkEntry>()
+        var second = SyncedCollection<BookmarkEntry>()
+        first.replace(with: [bookmark("a")])
+        second.replace(with: [bookmark("b")])
+        first.merge(second)
+        second.merge(first)
+        XCTAssertEqual(first.values, second.values)
+        XCTAssertEqual(Set(first.values.map(\.id)), ["a", "b"])
+        let offline = second
+        first.replace(with: [bookmark("b")])
+        first.merge(offline)
+        second.merge(first)
+        XCTAssertEqual(first.values.map(\.id), ["b"])
+        XCTAssertEqual(second.values, first.values)
+        let reloaded = try SyncedCollection<BookmarkEntry>.decode(JSONEncoder().encode(first), legacyDate: { $0.lastOpened })
+        second.merge(reloaded)
+        XCTAssertEqual(second.values.map(\.id), ["b"])
+    }
+
+    func testEqualClockConflictsHaveDeterministicWinner() {
+        let now = Date(timeIntervalSince1970: 200)
+        var first = SyncedCollection<BookmarkEntry>()
+        var second = first
+        first.replace(with: [bookmark("a")], now: now)
+        var changed = bookmark("a")
+        changed.position = .pdfPage(20)
+        second.replace(with: [changed], now: now)
+        let original = first
+        first.merge(second)
+        second.merge(original)
+        XCTAssertEqual(first.values, second.values)
+        first.replace(with: [], now: now.addingTimeInterval(-100))
+        first.merge(second)
+        XCTAssertTrue(first.values.isEmpty, "A clock rollback must not undo an observed deletion")
+    }
+
+    func testUnreadableCloudDoesNotEraseLocalEditsOrReplaceRemoteBytes() throws {
+        let suite = "Manicule.SyncTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var remote: Data?
+        let storage = SyncedCollectionStorage<BookmarkEntry>(key: "bookmarks", defaults: defaults,
+            readCloud: { remote }, writeCloud: { remote = $0 }, legacyDate: { $0.lastOpened })
+        storage.replace(with: [bookmark("a")])
+        let corrupt = Data("not JSON".utf8)
+        remote = corrupt
+        storage.synchronize()
+        XCTAssertEqual(storage.values.map(\.id), ["a"])
+        storage.replace(with: [bookmark("a"), bookmark("b")])
+        XCTAssertEqual(remote, corrupt)
+        XCTAssertNotNil(storage.error)
+        let reloaded = SyncedCollectionStorage<BookmarkEntry>(key: "bookmarks", defaults: defaults,
+            readCloud: { remote }, writeCloud: { remote = $0 }, legacyDate: { $0.lastOpened })
+        XCTAssertEqual(Set(reloaded.values.map(\.id)), ["a", "b"])
+        remote = nil
+        reloaded.synchronize()
+        XCTAssertNotNil(remote)
+    }
+
+    func testFailedCloudWriteRetainsRecoveryAndLegacyArraysMigrate() throws {
+        let suite = "Manicule.SyncTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacy = try JSONEncoder().encode([bookmark("a")])
+        let storage = SyncedCollectionStorage<BookmarkEntry>(key: "bookmarks", defaults: defaults,
+            readCloud: { legacy }, writeCloud: { _ in throw CocoaError(.fileWriteOutOfSpace) }, legacyDate: { $0.lastOpened })
+        storage.replace(with: [])
+        XCTAssertTrue(storage.values.isEmpty)
+        XCTAssertNotNil(storage.error)
+        let reloaded = SyncedCollectionStorage<BookmarkEntry>(key: "bookmarks", defaults: defaults,
+            readCloud: { legacy }, writeCloud: { _ in }, legacyDate: { $0.lastOpened })
+        XCTAssertTrue(reloaded.values.isEmpty)
+    }
+
+    func testUnchangedSynchronizationDoesNotWriteAgain() throws {
+        let suite = "Manicule.SyncTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var remote: Data?
+        var writes = 0
+        let storage = SyncedCollectionStorage<BookmarkEntry>(key: "bookmarks", defaults: defaults,
+            readCloud: { remote }, writeCloud: { remote = $0; writes += 1 }, legacyDate: { $0.lastOpened })
+        storage.replace(with: [bookmark("b"), bookmark("a")])
+        let previous = writes
+        storage.synchronize()
+        storage.synchronize()
+        XCTAssertEqual(writes, previous)
+    }
+}
+
+@MainActor
+final class PreferencePersistenceTests: XCTestCase {
+    /// All persistence is isolated; these tests never use the user's KVS.
+    private final class Cloud: NSUbiquitousKeyValueStore {
+        var values: [String: Any] = [:]
+        override func data(forKey key: String) -> Data? { values[key] as? Data }
+        override func set(_ data: Data?, forKey key: String) { values[key] = data }
+        override var dictionaryRepresentation: [String: Any] { values }
+        override func removeObject(forKey key: String) { values.removeValue(forKey: key) }
+        override func synchronize() -> Bool { true }
+    }
+
+    func testMalformedCloudDoesNotOverwriteLocalPreferencesOrRemoteBytes() throws {
+        let suite = "Manicule.PreferenceTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "manicule.readingPrefs.overrides"
+        let local = ["book": BookOverride(fontSize: 24)]
+        defaults.set(try JSONEncoder().encode(local), forKey: key)
+        let cloud = Cloud()
+        let corrupt = Data("unreadable".utf8)
+        cloud.values[key] = corrupt
+        let preferences = ReadingPreferences(defaults: defaults, cloud: cloud, updatePinnedStatus: { _ in })
+        XCTAssertEqual(preferences.effective(for: "book").fontSize, 24)
+        XCTAssertNotNil(preferences.lastError)
+        preferences.setOverride(for: "book", override: BookOverride(fontSize: 30))
+        XCTAssertEqual(cloud.data(forKey: key), corrupt)
+        let saved = try XCTUnwrap(defaults.data(forKey: key))
+        XCTAssertEqual(try JSONDecoder().decode([String: BookOverride].self, from: saved)["book"]?.fontSize, 30)
+    }
+
+    func testConcurrentPreferenceEditsMergeAndDeletionsDoNotResurrect() throws {
+        let suite = "Manicule.PreferenceTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "manicule.readingPrefs.overrides"
+        defaults.set(try JSONEncoder().encode(["local": BookOverride(fontSize: 24)]), forKey: key)
+        let cloud = Cloud()
+        cloud.values[key] = try JSONEncoder().encode(["remote": BookOverride(fontSize: 30)])
+        let preferences = ReadingPreferences(defaults: defaults, cloud: cloud, updatePinnedStatus: { _ in })
+        XCTAssertEqual(Set(preferences.perBookOverrides.keys), ["local", "remote"])
+        preferences.removeOverride(for: "remote")
+        // An old device publishes the pre-deletion dictionary.
+        cloud.values[key] = try JSONEncoder().encode(["remote": BookOverride(fontSize: 30)])
+        NotificationCenter.default.post(name: NSUbiquitousKeyValueStore.didChangeExternallyNotification, object: cloud)
+        XCTAssertNil(preferences.perBookOverrides["remote"])
+        XCTAssertNotNil(preferences.perBookOverrides["local"])
+    }
+
+    func testQuotaNotificationReachesTheErrorSurface() throws {
+        let suite = "Manicule.PreferenceTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let cloud = Cloud()
+        let preferences = ReadingPreferences(defaults: defaults, cloud: cloud, updatePinnedStatus: { _ in })
+        NotificationCenter.default.post(name: NSUbiquitousKeyValueStore.didChangeExternallyNotification, object: cloud,
+            userInfo: [NSUbiquitousKeyValueStoreChangeReasonKey: NSUbiquitousKeyValueStoreQuotaViolationChange])
+        XCTAssertEqual(preferences.lastError, ReadingCloud.quotaMessage)
+    }
+}
+
+@MainActor
+final class ReadingMembershipTests: XCTestCase {
+    private func position(_ page: Int) -> AutoSavedPosition {
+        AutoSavedPosition(id: "book", fileName: "Book.pdf", position: .pdfPage(page), lastOpened: Date())
+    }
+
+    func testOfflineAutosaveCannotUndoRemovalAndOldWindowCannotUndoReopening() throws {
+        var first = SyncedCollection<AutoSavedPosition>()
+        first.replace(with: [position(3)], now: Date(timeIntervalSince1970: 100))
+        var offline = first
+        let oldSession = try XCTUnwrap(first.membership(for: "book"))
+        first.replace(with: [], now: Date(timeIntervalSince1970: 200))
+        XCTAssertTrue(offline.update(position(8), membership: oldSession, now: Date(timeIntervalSince1970: 300)))
+        first.merge(offline)
+        offline.merge(first)
+        XCTAssertTrue(first.values.isEmpty)
+        XCTAssertTrue(offline.values.isEmpty)
+        XCTAssertFalse(offline.update(position(9), membership: oldSession))
+
+        // Explicit opening creates a new membership; the old window stays revoked.
+        first.replace(with: [position(0)], now: Date(timeIntervalSince1970: 400))
+        offline.merge(first)
+        XCTAssertFalse(offline.update(position(10), membership: oldSession))
+        let newSession = try XCTUnwrap(offline.membership(for: "book"))
+        XCTAssertNotEqual(oldSession, newSession)
+        XCTAssertTrue(offline.update(position(1), membership: newSession))
+        XCTAssertEqual(offline.values.first?.position, .pdfPage(1))
+    }
+
+    func testRemovalReceivedDuringSaveWinsAndSurvivesRelaunch() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        var remote: Data?
+        let storage = SyncedCollectionStorage<AutoSavedPosition>(key: "reading", defaults: defaults,
+            readCloud: { remote }, writeCloud: { remote = $0 }, legacyDate: { $0.lastOpened })
+        storage.replace(with: [position(2)])
+        let session = try XCTUnwrap(storage.membership(for: "book"))
+        var other = try SyncedCollection<AutoSavedPosition>.decode(XCTUnwrap(remote), legacyDate: { $0.lastOpened })
+        other.replace(with: [])
+        remote = try JSONEncoder().encode(other)
+        XCTAssertFalse(storage.update(position(7), membership: session))
+        XCTAssertTrue(storage.values.isEmpty)
+        let relaunched = SyncedCollectionStorage<AutoSavedPosition>(key: "reading", defaults: defaults,
+            readCloud: { remote }, writeCloud: { remote = $0 }, legacyDate: { $0.lastOpened })
+        XCTAssertTrue(relaunched.values.isEmpty)
+    }
+
+    func testExistingRecordEnvelopeWithoutMembershipStillMigrates() throws {
+        var state = SyncedCollection<AutoSavedPosition>()
+        state.replace(with: [position(2)])
+        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? [String: Any])
+        var records = try XCTUnwrap(envelope["records"] as? [String: [String: Any]])
+        records["book"]?.removeValue(forKey: "membership")
+        envelope["records"] = records
+        var migrated = try SyncedCollection<AutoSavedPosition>.decode(
+            JSONSerialization.data(withJSONObject: envelope), legacyDate: { $0.lastOpened })
+        let session = try XCTUnwrap(migrated.membership(for: "book"))
+        XCTAssertTrue(migrated.update(position(3), membership: session))
+        XCTAssertEqual(migrated.membership(for: "book"), session)
+    }
+}

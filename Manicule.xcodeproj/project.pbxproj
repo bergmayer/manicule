@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0981C010000000000000001 /* AppIconStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0981C010000000000000002 /* AppIconStoreTests.swift */; };
 		22797AFC8D25F9D60F3E3961 /* FileHasherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78E65922917E96164B83722E /* FileHasherTests.swift */; };
 		29887A94C3FC924B8136E852 /* DocumentContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */; };
 		311F13F02F4DEDF1007FDDEA /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 311F13EF2F4DEDF1007FDDEA /* ZIPFoundation */; };
@@ -24,6 +25,14 @@
 		A9C0B1D2E3F4051627384901 /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */; };
 		B3D4E5F607182A3B4C5D6E7F /* TestFilesIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* TestFilesIntegrationTests.swift */; };
 		E1CA533237882F0E8A02C47D /* RelocateEventTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A447A41AF71C2B803B61F2C /* RelocateEventTests.swift */; };
+		DCD100000000000000000000 /* EPubBook.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000000 /* EPubBook.swift */; };
+		DCD100000000000000000001 /* EPubParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000001 /* EPubParser.swift */; };
+		DCD100000000000000000002 /* ComicArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000002 /* ComicArchive.swift */; };
+		DCD100000000000000000003 /* DocumentError.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000003 /* DocumentError.swift */; };
+		DCD100000000000000000004 /* TemporaryDirectoryLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000004 /* TemporaryDirectoryLease.swift */; };
+		DCD100000000000000000005 /* ZipExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000005 /* ZipExtractor.swift */; };
+		DCD100000000000000000006 /* TextDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCD000000000000000000006 /* TextDecoder.swift */; };
+		C1091C020000000000000005 /* AppIconUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1091C020000000000000004; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -58,6 +67,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C0981C010000000000000002 /* AppIconStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconStoreTests.swift; sourceTree = "<group>"; };
 		0A447A41AF71C2B803B61F2C /* RelocateEventTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RelocateEventTests.swift; path = "ManiculeTests/RelocateEventTests.swift"; sourceTree = "<group>"; };
 		311F13BC2F4DE7BF007FDDEA /* Manicule.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Manicule.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		311F14012F4DF17F007FDDEA /* ManiculeQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "ManiculeQuickLook.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -76,6 +86,15 @@
 		A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "Manicule/Utilities/MarkdownHTMLRenderer.swift"; sourceTree = "<group>"; };
 		D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DocumentContentTests.swift; sourceTree = "<group>"; };
 		F401D3A3C8F6802799E4ECF1 /* ManiculeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "ManiculeTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		DCD000000000000000000000 /* EPubBook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Models/EPubBook.swift"; sourceTree = "<group>"; };
+		DCD000000000000000000001 /* EPubParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Models/EPubParser.swift"; sourceTree = "<group>"; };
+		DCD000000000000000000002 /* ComicArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Models/ComicArchive.swift"; sourceTree = "<group>"; };
+		DCD000000000000000000003 /* DocumentError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Models/DocumentError.swift"; sourceTree = "<group>"; };
+		DCD000000000000000000004 /* TemporaryDirectoryLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Utilities/TemporaryDirectoryLease.swift"; sourceTree = "<group>"; };
+		DCD000000000000000000005 /* ZipExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Utilities/ZipExtractor.swift"; sourceTree = "<group>"; };
+		DCD000000000000000000006 /* TextDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Manicule/Utilities/TextDecoder.swift"; sourceTree = "<group>"; };
+		C1091C020000000000000004 /* AppIconUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconUITests.swift; sourceTree = "<group>"; };
+		C1091C020000000000000002 /* ManiculeUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ManiculeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -142,6 +161,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1091C020000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -149,6 +169,13 @@
 			isa = PBXGroup;
 			children = (
 				A9C0B1D2E3F4051627384902 /* MarkdownHTMLRenderer.swift */,
+				DCD000000000000000000006 /* TextDecoder.swift */,
+				DCD000000000000000000005 /* ZipExtractor.swift */,
+				DCD000000000000000000004 /* TemporaryDirectoryLease.swift */,
+				DCD000000000000000000003 /* DocumentError.swift */,
+				DCD000000000000000000002 /* ComicArchive.swift */,
+				DCD000000000000000000001 /* EPubParser.swift */,
+				DCD000000000000000000000 /* EPubBook.swift */,
 				311F13BE2F4DE7BF007FDDEA /* Manicule */,
 				311F14052F4DF17F007FDDEA /* ManiculeQuickLook */,
 				311F14022F4DF17F007FDDEA /* Frameworks */,
@@ -157,6 +184,7 @@
 				3154DE622F4E0844007EAE25 /* Manicule-macOS-Local.entitlements */,
 				31A5B0302F500030007FDDEA /* Manicule-macOS.entitlements */,
 				C206C7A30107A0A89CE5EC5B /* ManiculeTests */,
+				C1091C020000000000000003 /* ManiculeUITests */,
 				31266C242F5AFED400E6EC17 /* Recovered References */,
 			);
 			sourceTree = "<group>";
@@ -167,6 +195,7 @@
 				311F13BC2F4DE7BF007FDDEA /* Manicule.app */,
 				311F14012F4DF17F007FDDEA /* ManiculeQuickLook.appex */,
 				F401D3A3C8F6802799E4ECF1 /* ManiculeTests.xctest */,
+				C1091C020000000000000002 /* ManiculeUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -200,6 +229,7 @@
 		C206C7A30107A0A89CE5EC5B /* ManiculeTests */ = {
 			isa = PBXGroup;
 			children = (
+				C0981C010000000000000002 /* AppIconStoreTests.swift */,
 				D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */,
 				A73D11B22C33D44E55F60003 /* EPubWebViewIntegrationTests.swift */,
 				78E65922917E96164B83722E /* FileHasherTests.swift */,
@@ -211,6 +241,7 @@
 			path = "ManiculeTests";
 			sourceTree = "<group>";
 		};
+		C1091C020000000000000003 /* ManiculeUITests */ = {isa = PBXGroup; children = (C1091C020000000000000004 /* AppIconUITests.swift */,); path = ManiculeUITests; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -282,6 +313,17 @@
 			productReference = F401D3A3C8F6802799E4ECF1 /* ManiculeTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		C1091C020000000000000001 /* ManiculeUITests */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = C1091C02000000000000000C;
+            buildPhases = (C1091C020000000000000006, C1091C020000000000000007, C1091C020000000000000008,);
+            buildRules = ();
+            dependencies = (C1091C020000000000000009,);
+            name = ManiculeUITests;
+            productName = ManiculeUITests;
+            productReference = C1091C020000000000000002;
+            productType = "com.apple.product-type.bundle.ui-testing";
+        };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -321,6 +363,7 @@
 				311F13BB2F4DE7BF007FDDEA /* Manicule */,
 				311F14002F4DF17F007FDDEA /* ManiculeQuickLook */,
 				9630350333FBF7D93EED9F4E /* ManiculeTests */,
+				C1091C020000000000000001 /* ManiculeUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -347,6 +390,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1091C020000000000000008 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -362,6 +406,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				A9C0B1D2E3F4051627384901 /* MarkdownHTMLRenderer.swift in Sources */,
+				DCD100000000000000000006 /* TextDecoder.swift in Sources */,
+				DCD100000000000000000005 /* ZipExtractor.swift in Sources */,
+				DCD100000000000000000004 /* TemporaryDirectoryLease.swift in Sources */,
+				DCD100000000000000000003 /* DocumentError.swift in Sources */,
+				DCD100000000000000000002 /* ComicArchive.swift in Sources */,
+				DCD100000000000000000001 /* EPubParser.swift in Sources */,
+				DCD100000000000000000000 /* EPubBook.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -369,6 +420,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0981C010000000000000001 /* AppIconStoreTests.swift in Sources */,
 				A479CD66F7EDC749C1E2AADD /* ReadingPositionTests.swift in Sources */,
 				E1CA533237882F0E8A02C47D /* RelocateEventTests.swift in Sources */,
 				29887A94C3FC924B8136E852 /* DocumentContentTests.swift in Sources */,
@@ -381,6 +433,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1091C020000000000000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C1091C020000000000000005,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -395,6 +448,7 @@
 			target = 311F13BB2F4DE7BF007FDDEA /* Manicule */;
 			targetProxy = F2F959C3752A4CA39FA79B80 /* PBXContainerItemProxy */;
 		};
+		C1091C020000000000000009 = {isa = PBXTargetDependency; target = 311F13BB2F4DE7BF007FDDEA /* Manicule */; targetProxy = F2F959C3752A4CA39FA79B80; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -744,6 +798,38 @@
 			};
 			name = Debug;
 		};
+		C1091C02000000000000000A = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                GENERATE_INFOPLIST_FILE = YES;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                PRODUCT_BUNDLE_IDENTIFIER = com.palefire.manicule.uitests;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SDKROOT = iphoneos;
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_VERSION = 6.0;
+                TARGETED_DEVICE_FAMILY = "1,2";
+                TEST_TARGET_NAME = Manicule;
+            };
+            name = Debug;
+        };
+		C1091C02000000000000000B = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                GENERATE_INFOPLIST_FILE = YES;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                PRODUCT_BUNDLE_IDENTIFIER = com.palefire.manicule.uitests;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SDKROOT = iphoneos;
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_VERSION = 6.0;
+                TARGETED_DEVICE_FAMILY = "1,2";
+                TEST_TARGET_NAME = Manicule;
+            };
+            name = Release;
+        };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -783,6 +869,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		C1091C02000000000000000C = {isa = XCConfigurationList; buildConfigurations = (C1091C02000000000000000A, C1091C02000000000000000B,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */

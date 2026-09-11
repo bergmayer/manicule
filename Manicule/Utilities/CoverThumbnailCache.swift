@@ -8,11 +8,31 @@ import os.log
 /// Thumbnails are stored as JPEGs in the app's Caches directory, keyed by fileHash.
 /// Small versions are also synced via iCloud KV store so covers appear on all devices.
 /// All heavy work uses CGImage (not UIImage/NSImage) to avoid main-actor constraints.
-final class CoverThumbnailCache: Sendable {
+@MainActor
+final class CoverThumbnailCache {
     static let shared = CoverThumbnailCache()
     private nonisolated static let logger = Logger(subsystem: "com.palefire.manicule", category: "CoverCache")
 
     private let cacheDir: URL
+    private var jobs: [String: Task<Void, Never>] = [:]
+    private let renderer = CoverRenderer()
+
+    private enum Source: Sendable {
+        case content(DocumentContent)
+        case file(URL, Data)
+    }
+
+    /// Serialize archive/PDF decoding so rapid library changes cannot start
+    /// an unbounded number of heavy extractions in parallel.
+    private actor CoverRenderer {
+        func image(_ source: Source, dimension: CGFloat) -> CGImage? {
+            guard !Task.isCancelled else { return nil }
+            switch source {
+            case .content(let content): return CoverThumbnailCache.extractCover(from: content, maxDim: dimension)
+            case .file(let url, let data): return CoverThumbnailCache.extractCoverFromFile(url: url, data: data, maxDim: dimension)
+            }
+        }
+    }
     private let maxDim: CGFloat = 240
     /// Smaller dimension for the iCloud-synced version (keeps JPEG under ~8KB)
     private let syncDim: CGFloat = 120
@@ -32,7 +52,7 @@ final class CoverThumbnailCache: Sendable {
             object: NSUbiquitousKeyValueStore.default,
             queue: .main
         ) { [weak self] _ in
-            self?.pullCoversFromiCloud()
+            MainActor.assumeIsolated { self?.pullCoversFromiCloud() }
         }
     }
 
@@ -44,45 +64,48 @@ final class CoverThumbnailCache: Sendable {
         if FileManager.default.fileExists(atPath: path.path) { return path }
         // Try pulling from iCloud if not in local cache
         if let data = NSUbiquitousKeyValueStore.default.data(forKey: Self.iCloudCoverPrefix + fileHash) {
-            try? data.write(to: path, options: .atomic)
-            return path
+            do {
+                try data.write(to: path, options: .atomic)
+                return path
+            } catch { Self.logger.info("Cover cache write failed: \(error.localizedDescription)") }
         }
         return nil
     }
 
-    /// Generate and cache a cover from parsed document content (called at open time).
-    /// Dispatches heavy work to a background thread. Also syncs to iCloud.
     func generateIfNeeded(for content: DocumentContent, fileHash: String) {
+        generate(.content(content), fileHash: fileHash)
+    }
+
+    func generateFromFile(at url: URL, data: Data, fileHash: String) {
+        generate(.file(url, data), fileHash: fileHash)
+    }
+
+    func waitForCover(for fileHash: String) async {
+        await jobs[fileHash]?.value
+    }
+
+    private func generate(_ source: Source, fileHash: String) {
+        guard jobs[fileHash] == nil else { return }
         let path = jpegPath(for: fileHash)
         guard !FileManager.default.fileExists(atPath: path.path) else {
-            // Local cache exists — ensure it's also in iCloud
             pushCoverToiCloudIfNeeded(fileHash: fileHash)
             return
         }
-        let dim = maxDim
-        let syncDim = self.syncDim
-        Task.detached(priority: .utility) {
-            guard let cgImage = Self.extractCover(from: content, maxDim: dim) else { return }
-            Self.saveCGImageAsJPEG(cgImage, to: path)
-            // Also create a small version for iCloud sync
-            Self.pushToiCloud(cgImage: cgImage, fileHash: fileHash, syncDim: syncDim)
+        jobs[fileHash] = Task { [weak self, renderer, maxDim] in
+            let image = await renderer.image(source, dimension: maxDim)
+            guard !Task.isCancelled, let self else { return }
+            defer { jobs.removeValue(forKey: fileHash) }
+            guard let image else { return }
+            Self.saveCGImageAsJPEG(image, to: path)
+            Self.pushToiCloud(cgImage: image, fileHash: fileHash, syncDim: syncDim)
         }
-    }
-
-    /// Generate a cover from raw file data + URL (for Recents grid on-demand generation).
-    /// Runs synchronously — caller is responsible for dispatching to background.
-    nonisolated func generateFromFileSync(at url: URL, data: Data, fileHash: String) {
-        let path = jpegPath(for: fileHash)
-        guard !FileManager.default.fileExists(atPath: path.path) else { return }
-        guard let cgImage = Self.extractCoverFromFile(url: url, data: data, maxDim: maxDim) else { return }
-        Self.saveCGImageAsJPEG(cgImage, to: path)
-        Self.pushToiCloud(cgImage: cgImage, fileHash: fileHash, syncDim: syncDim)
     }
 
     /// Delete the cached cover (local JPEG and the iCloud-synced copy).
     /// Called when a book leaves the tracked list so cover data doesn't
     /// accumulate in the Caches directory and the iCloud KV quota.
     func removeCover(for fileHash: String) {
+        jobs.removeValue(forKey: fileHash)?.cancel()
         try? FileManager.default.removeItem(at: jpegPath(for: fileHash))
         NSUbiquitousKeyValueStore.default.removeObject(forKey: Self.iCloudCoverPrefix + fileHash)
     }
@@ -91,6 +114,7 @@ final class CoverThumbnailCache: Sendable {
     /// identifier without regenerating the thumbnail.
     func migrateCover(from legacyHash: String, to fileHash: String) {
         guard legacyHash != fileHash else { return }
+        jobs.removeValue(forKey: legacyHash)?.cancel()
         let oldPath = jpegPath(for: legacyHash)
         let newPath = jpegPath(for: fileHash)
         if FileManager.default.fileExists(atPath: oldPath.path) {
@@ -111,14 +135,17 @@ final class CoverThumbnailCache: Sendable {
         store.synchronize()
     }
 
-    private nonisolated func jpegPath(for fileHash: String) -> URL {
-        cacheDir.appendingPathComponent("\(fileHash).jpg")
+    private func jpegPath(for fileHash: String) -> URL {
+        // Hashes from cloud data are an external boundary, not trusted paths.
+        let component = (fileHash.count == 32 || fileHash.count == 64) && fileHash.allSatisfy(\.isHexDigit)
+            ? fileHash : FileHasher.hash(data: Data(fileHash.utf8))
+        return cacheDir.appendingPathComponent("\(component).jpg")
     }
 
     // MARK: - iCloud Sync
 
     /// Push a cover thumbnail to iCloud KV store (small JPEG for cross-device sync).
-    private nonisolated static func pushToiCloud(cgImage: CGImage, fileHash: String, syncDim: CGFloat) {
+    private static func pushToiCloud(cgImage: CGImage, fileHash: String, syncDim: CGFloat) {
         guard let syncImage = resized(cgImage, maxDimension: syncDim) else { return }
         var jpegData: Data?
         for quality in [0.55, 0.42, 0.3] {
@@ -147,8 +174,9 @@ final class CoverThumbnailCache: Sendable {
         }
 
         let key = iCloudCoverPrefix + fileHash
-        NSUbiquitousKeyValueStore.default.set(jpegData, forKey: key)
-        NSUbiquitousKeyValueStore.default.synchronize()
+        // Covers yield quota to irreplaceable reading state.
+        do { try ReadingCloud.write(jpegData, key: key) }
+        catch { logger.info("Cover sync skipped: \(error.localizedDescription)") }
     }
 
     /// Ensure a locally cached cover is also pushed to iCloud.
@@ -267,9 +295,12 @@ final class CoverThumbnailCache: Sendable {
     // MARK: - Save
 
     private nonisolated static func saveCGImageAsJPEG(_ cgImage: CGImage, to url: URL) {
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return }
         CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.75] as CFDictionary)
-        CGImageDestinationFinalize(dest)
+        guard CGImageDestinationFinalize(dest) else { return }
+        do { try (data as Data).write(to: url, options: .atomic) }
+        catch { logger.info("Cover cache write failed: \(error.localizedDescription)") }
     }
 
     private nonisolated static func resized(_ image: CGImage, maxDimension: CGFloat) -> CGImage? {

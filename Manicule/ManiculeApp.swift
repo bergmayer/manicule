@@ -27,11 +27,14 @@ struct ManiculeApp: App {
             .preferenceErrorAlert()
         }
         .defaultSize(width: 800, height: 1000)
+        #if os(macOS)
         .windowToolbarStyle(.unified(showsTitle: false))
+        #endif
         .commands {
             ReaderMenuCommands()
         }
 
+        #if os(macOS)
         Settings {
             TabView {
                 ReadingSettingsView(fileHash: nil)
@@ -44,6 +47,7 @@ struct ManiculeApp: App {
             .frame(minWidth: 560, idealWidth: 600, maxWidth: 640, minHeight: 600)
             .preferenceErrorAlert()
         }
+        #endif
         #endif
     }
 }

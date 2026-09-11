@@ -48,10 +48,13 @@ enum FileProviderPrimer {
         guard !candidates.isEmpty else { return }
         primerLog.info("Pre-warm: nudging FileProvider for \(candidates.count) recent books")
 
-        for (name, ref) in candidates {
-            Task.detached(priority: .background) {
-                if (await resolveFileProviderURL(ref, budget: .prewarm)) != nil {
-                    primerLog.info("Pre-warm: \(name, privacy: .public) primed")
+        await withTaskGroup(of: Void.self) { group in
+            for (name, ref) in candidates {
+                group.addTask(priority: .background) {
+                    guard !Task.isCancelled else { return }
+                    if (await resolveFileProviderURL(ref, budget: .prewarm)) != nil {
+                        primerLog.info("Pre-warm: \(name, privacy: .public) primed")
+                    }
                 }
             }
         }
@@ -71,7 +74,9 @@ enum FileProviderPrimer {
         primerLog.info("Attempting FP capture for \(url.lastPathComponent, privacy: .public)")
         do {
             let (itemID, domainID) = try await NSFileProviderManager.identifierForUserVisibleFile(at: url)
+            try Task.checkCancellation()
             await MainActor.run {
+                guard !Task.isCancelled else { return }
                 BookmarkStore.shared.saveFileProviderRef(
                     domain: domainID.rawValue,
                     item: itemID.rawValue,
@@ -95,10 +100,9 @@ enum FileProviderPrimer {
         let domainID = NSFileProviderDomainIdentifier(ref.domain)
         let itemID = NSFileProviderItemIdentifier(ref.item)
         for (attempt, delay) in budget.delaysMillis.enumerated() {
-            if delay > 0 {
-                try? await Task.sleep(nanoseconds: delay * 1_000_000)
-            }
             do {
+                try Task.checkCancellation()
+                if delay > 0 { try await Task.sleep(for: .milliseconds(delay)) }
                 let domains = try await NSFileProviderManager.domains()
                 guard let domain = domains.first(where: { $0.identifier == domainID }),
                       let manager = NSFileProviderManager(for: domain) else {
@@ -106,8 +110,11 @@ enum FileProviderPrimer {
                     continue
                 }
                 let url = try await manager.getUserVisibleURL(for: itemID)
+                try Task.checkCancellation()
                 primerLog.info("FP attempt \(attempt + 1): resolved \(url.lastPathComponent, privacy: .public)")
                 return url
+            } catch is CancellationError {
+                return nil
             } catch {
                 primerLog.info("FP attempt \(attempt + 1) failed for \(ref.domain, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }

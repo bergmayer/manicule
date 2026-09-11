@@ -1,11 +1,7 @@
 import Vision
 import CoreGraphics
 
-#if canImport(UIKit)
-import UIKit
-#else
-import AppKit
-#endif
+import ImageIO
 
 /// A single recognized text observation with its bounding box.
 struct OCRResult: Sendable {
@@ -18,26 +14,45 @@ struct OCRResult: Sendable {
 actor OCRService {
     static let shared = OCRService()
 
-    private var cache: [URL: [OCRResult]] = [:]
+    private enum Page: Hashable {
+        case file(URL)
+        case pdf(hash: String, index: Int)
+    }
+    private var cache: [Page: [OCRResult]] = [:]
 
     /// Recognize text in the image at the given URL.
     /// Returns an array of recognized text results with bounding boxes.
-    func recognizeText(in imageURL: URL) async -> [OCRResult] {
-        if let cached = cache[imageURL] { return cached }
+    func recognizeText(in imageURL: URL) async throws -> [OCRResult] {
+        let key = Page.file(imageURL)
+        if let cached = cache[key] { return cached }
+        try Task.checkCancellation()
+        guard let image = loadCGImage(from: imageURL) else { throw CocoaError(.fileReadCorruptFile) }
+        return try await recognizeText(in: image, key: key)
+    }
 
-        guard let cgImage = loadCGImage(from: imageURL) else { return [] }
-
-        let results = performOCR(on: cgImage)
+    private func recognizeText(in image: CGImage, key: Page) async throws -> [OCRResult] {
+        if let cached = cache[key] { return cached }
+        try Task.checkCancellation()
+        let results = try await performOCR(on: image)
+        try Task.checkCancellation()
         // Entries for closed documents are never evicted individually (their
         // temp URLs are unique per open), so cap the cache to bound memory.
         if cache.count >= 500 { cache.removeAll() }
-        cache[imageURL] = results
+        cache[key] = results
         return results
     }
 
     /// Check if a page's recognized text contains the query (case-insensitive).
-    func pageContains(imageURL: URL, query: String) async -> Bool {
-        let results = await recognizeText(in: imageURL)
+    func pageContains(imageURL: URL, query: String) async throws -> Bool {
+        let results = try await recognizeText(in: imageURL)
+        let lowered = query.lowercased()
+        return results.contains { $0.text.lowercased().contains(lowered) }
+    }
+
+    /// PDF searches share recognition by immutable document identity, without
+    /// temporary image files or collisions between windows and cancelled scans.
+    func pageContains(image: CGImage, fileHash: String, pageIndex: Int, query: String) async throws -> Bool {
+        let results = try await recognizeText(in: image, key: .pdf(hash: fileHash, index: pageIndex))
         let lowered = query.lowercased()
         return results.contains { $0.text.lowercased().contains(lowered) }
     }
@@ -49,32 +64,22 @@ actor OCRService {
     // MARK: - Private
 
     private func loadCGImage(from url: URL) -> CGImage? {
-        #if canImport(UIKit)
-        guard let uiImage = UIImage(contentsOfFile: url.path),
-              let cgImage = uiImage.cgImage else { return nil }
-        return cgImage
-        #else
-        guard let nsImage = NSImage(contentsOf: url),
-              let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        return cgImage
-        #endif
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
-    /// Runs recognition synchronously on the actor. `perform` blocks until the
-    /// request completes, so reading `request.results` afterwards is safe and
-    /// avoids the completion-handler/continuation dance (which could double-
-    /// resume when `perform` both invokes the handler and throws).
-    private func performOCR(on image: CGImage) -> [OCRResult] {
-        let request = VNRecognizeTextRequest()
+    /// Vision's Swift request API keeps recognition in the caller's task. Its
+    /// throwing result distinguishes analysis failure from a page with no text.
+    private func performOCR(on image: CGImage) async throws -> [OCRResult] {
+        var request = RecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
 
-        let handler = VNImageRequestHandler(cgImage: image)
-        guard (try? handler.perform([request])) != nil,
-              let observations = request.results else { return [] }
+        let observations = try await request.perform(on: image)
+        try Task.checkCancellation()
         return observations.compactMap { obs -> OCRResult? in
             guard let candidate = obs.topCandidates(1).first else { return nil }
-            return OCRResult(text: candidate.string, boundingBox: obs.boundingBox)
+            return OCRResult(text: candidate.string, boundingBox: obs.boundingBox.cgRect)
         }
     }
 }

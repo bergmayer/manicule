@@ -3,15 +3,9 @@ import UniformTypeIdentifiers
 import PDFKit
 @testable import Manicule
 
-/// Integration tests that run against real files in the `test_files/` directory.
-///
-/// Drop any supported files into `test_files/` at the project root. The tests
-/// dynamically discover all files and verify each one can be parsed, has valid
-/// content, and (for formats the Quick Look extension supports) can be previewed.
-///
-/// Supported extensions: .pdf, .epub, .cbz, .cbr, .txt, .md, .markdown
-///
-/// `test_files/` is in .gitignore — each developer supplies their own files.
+/// Runs every format against owned fixtures on every destination. Developers
+/// may additionally supply a test_files/ corpus; its absence never makes these
+/// tests silently execute zero documents.
 @MainActor
 final class TestFilesIntegrationTests: XCTestCase {
 
@@ -40,42 +34,41 @@ final class TestFilesIntegrationTests: XCTestCase {
         return candidate  // return the #filePath-based path even if missing (for error message)
     }()
 
-    private static var testFiles: [(url: URL, ext: String)] = {
-        guard FileManager.default.fileExists(atPath: testFilesDir.path) else { return [] }
-        guard let enumerator = FileManager.default.enumerator(
-            at: testFilesDir,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-        ) else { return [] }
+    private static let fixtureDirectory = try! TemporaryDirectoryLease.create(prefix: "manicule-test-corpus")
 
-        var files: [(URL, String)] = []
-        while let url = enumerator.nextObject() as? URL {
-            let ext = url.pathExtension.lowercased()
-            if supportedExtensions.contains(ext) {
-                files.append((url, ext))
+    private static func testFiles() throws -> [(url: URL, ext: String)] {
+        let fixtures: [(String, Data)] = [
+            ("Page.pdf", DocumentContentTests.minimalPDF),
+            ("Book.epub", try DocumentContentTests.minimalEPub()),
+            ("Comic.cbz", try DocumentContentTests.minimalCBZ()),
+            ("Stored comic.cbr", DocumentContentTests.minimalCBR),
+            ("Unicode.txt", Data("Café 日本語 👋".utf8)),
+            ("Notes.md", Data("# Heading\n\nA **bold** paragraph.".utf8)),
+            ("Long extension.markdown", Data("## Subheading\n\nDistinct text.".utf8)),
+        ]
+        var result: [(URL, String)] = try fixtures.map { name, data in
+            let url = fixtureDirectory.url.appendingPathComponent(name)
+            try data.write(to: url, options: .atomic)
+            return (url, url.pathExtension)
+        }
+        if FileManager.default.fileExists(atPath: testFilesDir.path) {
+            let optional = try FileManager.default.contentsOfDirectory(at: testFilesDir,
+                includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+            for url in optional where supportedExtensions.contains(url.pathExtension.lowercased()) {
+                result.append((url, url.pathExtension.lowercased()))
             }
         }
-        return files.sorted { $0.0.lastPathComponent < $1.0.lastPathComponent }
-    }()
-
-    // MARK: - Discovery
-
-    func testTestFilesDirectoryExists() throws {
-        guard FileManager.default.fileExists(atPath: Self.testFilesDir.path) else {
-            throw XCTSkip("Optional test_files/ corpus is not installed at \(Self.testFilesDir.path)")
-        }
+        return result
     }
 
-    func testAtLeastOneTestFile() throws {
-        guard !Self.testFiles.isEmpty else {
-            throw XCTSkip("Optional test_files/ corpus contains no supported documents")
-        }
+    func testFixtureCorpusCoversEverySupportedExtension() throws {
+        XCTAssertEqual(Set(try Self.testFiles().map(\.ext)), Self.supportedExtensions)
     }
 
     // MARK: - Parsing (all formats)
 
     func testAllFilesParseSuccessfully() throws {
-        for (url, ext) in Self.testFiles {
+        for (url, ext) in try Self.testFiles() {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             XCTAssertFalse(data.isEmpty, "\(name): file is empty")
@@ -106,7 +99,7 @@ final class TestFilesIntegrationTests: XCTestCase {
     // MARK: - PDF
 
     func testPDFFilesLoadWithPDFKit() throws {
-        for (url, ext) in Self.testFiles where ext == "pdf" {
+        for (url, ext) in try Self.testFiles() where ext == "pdf" {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             guard let doc = PDFDocument(data: data) else {
@@ -131,7 +124,7 @@ final class TestFilesIntegrationTests: XCTestCase {
     // MARK: - ePub
 
     func testEPubFilesHaveValidStructure() throws {
-        for (url, ext) in Self.testFiles where ext == "epub" {
+        for (url, ext) in try Self.testFiles() where ext == "epub" {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             let book: EPubBook
@@ -175,7 +168,7 @@ final class TestFilesIntegrationTests: XCTestCase {
     // MARK: - Comics (CBZ/CBR)
 
     func testComicFilesHavePages() throws {
-        for (url, ext) in Self.testFiles where ext == "cbz" || ext == "cbr" {
+        for (url, ext) in try Self.testFiles() where ext == "cbz" || ext == "cbr" {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
 
@@ -204,7 +197,7 @@ final class TestFilesIntegrationTests: XCTestCase {
 
     func testTextFilesHaveContent() throws {
         let textExts: Set<String> = ["txt", "md", "markdown"]
-        for (url, ext) in Self.testFiles where textExts.contains(ext) {
+        for (url, ext) in try Self.testFiles() where textExts.contains(ext) {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             let text = String(data: data, encoding: .utf8)
@@ -216,7 +209,7 @@ final class TestFilesIntegrationTests: XCTestCase {
     #if os(iOS) || os(visionOS)
     func testMarkdownFilesStripCleanly() throws {
         let mdExts: Set<String> = ["md", "markdown"]
-        for (url, ext) in Self.testFiles where mdExts.contains(ext) {
+        for (url, ext) in try Self.testFiles() where mdExts.contains(ext) {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             guard let text = String(data: data, encoding: .utf8) else { continue }
@@ -238,7 +231,7 @@ final class TestFilesIntegrationTests: XCTestCase {
     // MARK: - File Hashing
 
     func testAllFilesHashConsistently() throws {
-        for (url, _) in Self.testFiles {
+        for (url, _) in try Self.testFiles() {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             let h1 = FileHasher.hash(data: data)
@@ -250,7 +243,7 @@ final class TestFilesIntegrationTests: XCTestCase {
 
     func testAllFilesHashUniquely() throws {
         var hashes: [String: String] = [:] // hash -> filename
-        for (url, _) in Self.testFiles {
+        for (url, _) in try Self.testFiles() {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             let hash = FileHasher.hash(data: data)
@@ -267,7 +260,7 @@ final class TestFilesIntegrationTests: XCTestCase {
     // MARK: - ReaderDocument (full document init path)
 
     func testAllFilesLoadAsReaderDocument() throws {
-        for (url, ext) in Self.testFiles {
+        for (url, ext) in try Self.testFiles() {
             let name = url.lastPathComponent
             let data = try Data(contentsOf: url)
             let contentType = UTType(filenameExtension: ext) ?? .data

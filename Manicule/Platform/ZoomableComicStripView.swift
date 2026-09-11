@@ -12,7 +12,7 @@ struct ZoomableComicStripView: View {
     @Binding var zoomScale: Double
 
     var body: some View {
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         ZoomableComicStripView_iOS(
             pages: pages, containerSize: containerSize, trimWhitespace: trimWhitespace, onTap: onTap,
             currentPage: $currentPage, zoomScale: $zoomScale
@@ -28,7 +28,7 @@ struct ZoomableComicStripView: View {
 
 // MARK: - iOS Implementation
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
 
 /// UIScrollView subclass that triggers initial page layout once bounds are available.
 private class ComicStripUIScrollView: UIScrollView {

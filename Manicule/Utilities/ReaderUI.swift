@@ -161,12 +161,14 @@ struct ReaderSearchState: Equatable {
     var query: String = ""
     var currentIndex: Int = 0
     var isSearching: Bool = false
+    var error: String?
 
     mutating func reset() {
         isShowing = false
         query = ""
         currentIndex = 0
         isSearching = false
+        error = nil
     }
 }
 
@@ -263,3 +265,20 @@ extension View {
     }
 }
 
+
+private struct ReaderSearchErrorModifier: ViewModifier {
+    @Binding var error: String?
+    func body(content: Content) -> some View {
+        content.alert("Search Interrupted", isPresented: Binding(
+            get: { error != nil }, set: { if !$0 { error = nil } }
+        )) {
+            Button("OK", role: .cancel) { error = nil }
+        } message: { Text(error ?? "") }
+    }
+}
+
+extension View {
+    func readerSearchError(_ error: Binding<String?>) -> some View {
+        modifier(ReaderSearchErrorModifier(error: error))
+    }
+}

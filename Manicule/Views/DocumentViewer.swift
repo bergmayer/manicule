@@ -6,6 +6,7 @@ struct DocumentViewer: View {
     let fileURL: URL?
     var onClose: (() -> Void)?
     @State private var showChrome: Bool = true
+    @State private var readingSession: ReadingSession?
 
     var body: some View {
         Group {
@@ -21,6 +22,14 @@ struct DocumentViewer: View {
             case .comic(let archive):
                 ComicReaderView(archive: archive, fileURL: fileURL, rawData: document.rawData, fileHash: document.fileHash, showChrome: $showChrome, onClose: onClose)
             }
+        }
+        // DocumentGroup can deliver a new snapshot at the same file URL.
+        // Reader tasks and restoration state belong to that snapshot.
+        .id(document.fileHash)
+        .environment(\.readingSession, readingSession)
+        .task(id: document.fileHash) {
+            ReaderHelpers.migrateLegacyIdentity(data: document.rawData, currentHash: document.fileHash)
+            readingSession = fileURL.flatMap { BookmarkStore.shared.beginReading(document, at: $0) }
         }
         #if !os(macOS)
         .statusBarHidden(true)

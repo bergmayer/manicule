@@ -2,6 +2,19 @@ import XCTest
 @testable import Manicule
 
 final class PageNavigationTests: XCTestCase {
+    func testNearestFirstVisitsNeighborsOnceInReadingOrder() {
+        XCTAssertEqual(PageNavigation.nearestFirst(center: 2, pageCount: 5), [2, 3, 1, 4, 0])
+        XCTAssertEqual(PageNavigation.nearestFirst(center: 0, pageCount: 4), [0, 1, 2, 3])
+        XCTAssertEqual(PageNavigation.nearestFirst(center: 3, pageCount: 4), [3, 2, 1, 0])
+    }
+
+    func testNearestFirstClampsRestoredPositionsAndHandlesEmptyDocuments() {
+        XCTAssertEqual(PageNavigation.nearestFirst(center: -3, pageCount: 2), [0, 1])
+        XCTAssertEqual(PageNavigation.nearestFirst(center: 99, pageCount: 2), [1, 0])
+        XCTAssertEqual(PageNavigation.nearestFirst(center: 0, pageCount: 0), [])
+        XCTAssertEqual(PageNavigation.nearestFirst(center: 0, pageCount: 1), [0])
+    }
+
     func testEvenTwoUpDocumentStopsAtFinalSpread() {
         XCTAssertEqual(PageNavigation.next(current: 8, pageCount: 10, twoUp: true), 8)
         XCTAssertFalse(PageNavigation.canGoNext(current: 8, pageCount: 10, twoUp: true))

@@ -27,6 +27,7 @@ nonisolated final class ContentTrimmer: @unchecked Sendable {
         let rect = detectContent(in: image)
 
         lock.lock()
+        if cache.count >= 500 { cache.removeAll(keepingCapacity: true) }
         cache[key] = rect
         lock.unlock()
 

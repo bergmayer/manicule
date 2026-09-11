@@ -6,30 +6,21 @@ struct ComicReaderView: View {
     let archive: ComicArchive
     let fileURL: URL?
     let rawData: Data
+    @Environment(\.readingSession) private var readingSession
+    let fileHash: String
     @Binding var showChrome: Bool
     var onClose: (() -> Void)?
-
-    private let fileHash: String?
-
-    init(archive: ComicArchive, fileURL: URL?, rawData: Data, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
-        self.archive = archive
-        self.fileURL = fileURL
-        self.rawData = rawData
-        self._showChrome = showChrome
-        self.onClose = onClose
-        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
-    }
 
     @State private var currentPage: Int = 0
     @State private var readingDirection: ComicArchive.ReadingDirection = .leftToRight
     @State private var showBookmarks: Bool = false
     @State private var showSettings: Bool = false
     @State private var showThumbnails: Bool = false
-    @State private var twoUpOverride: Bool? = nil
+    private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
-    @State private var viewMode: ViewMode = .paginated
-    @State private var trimWhitespace: Bool = false
+    private var viewMode: ViewMode { readingPrefs.effective(for: fileHash).viewMode }
+    private var trimWhitespace: Bool { readingPrefs.effective(for: fileHash).trimWhitespace }
     @State private var zoomScale: Double = 1.0
     @State private var navigatingForward: Bool = true
 
@@ -65,14 +56,13 @@ struct ComicReaderView: View {
             .task {
                 ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
-                let eff = readingPrefs.effective(for: fileHash)
-                viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp
-                trimWhitespace = eff.trimWhitespace
                 restorePosition()
             }
+            .readerSearchError($search.error)
             .onDisappear {
                 autoSavePosition()
+                searchDebouncer.cancel()
+                clearComicSearch()
             }
             .onChange(of: currentPage) { _, newPage in
                 let normalized = PageNavigation.normalizedStart(
@@ -89,8 +79,8 @@ struct ComicReaderView: View {
             }
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
-                    BookmarkPickerView(fileHash: fileHash ?? "") { position in
-                        if case .comicPage(let page) = position, page < archive.pageCount {
+                    BookmarkPickerView(fileHash: fileHash) { position in
+                        if case .comicPage(let page) = position, archive.pages.indices.contains(page) {
                             currentPage = page
                         }
                     }
@@ -121,6 +111,7 @@ struct ComicReaderView: View {
                 readingDirection = readingDirection == .leftToRight ? .rightToLeft : .leftToRight
             }
             .onChange(of: search.query) { _, newQuery in
+                clearComicSearch()
                 searchDebouncer.handle(newQuery, perform: performComicSearch, clear: clearComicSearch)
             }
     }
@@ -363,7 +354,7 @@ struct ComicReaderView: View {
 
     @ViewBuilder
     private var paginatedContent: some View {
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         PaginatedComicContainerView(
             pages: archive.pages,
             currentPage: $currentPage,
@@ -503,15 +494,14 @@ struct ComicReaderView: View {
     }
 
     private var bookmarkedComicPages: Set<Int> {
-        Set(bookmarkStore.bookmarks(for: fileHash ?? "").compactMap { entry -> Int? in
+        Set(bookmarkStore.bookmarks(for: fileHash).compactMap { entry -> Int? in
             if case .comicPage(let page) = entry.position { return page }
             return nil
         })
     }
 
     private var isCurrentPositionBookmarked: Bool {
-        guard let hash = fileHash else { return false }
-        return bookmarkStore.isPositionBookmarked(fileHash: hash, position: .comicPage(currentPage))
+        return bookmarkStore.isPositionBookmarked(fileHash: fileHash, position: .comicPage(currentPage))
     }
 
     private var pageLabel: String {
@@ -561,9 +551,9 @@ struct ComicReaderView: View {
 
     private func autoSavePosition() {
         guard let url = fileURL else { return }
-        guard currentPage > 0 else { return }
+        guard archive.pageCount > 0 else { return }
         let position: ReadingPosition = .comicPage(currentPage)
-        bookmarkStore.savePosition(position, for: url, data: rawData, fileHash: fileHash)
+        bookmarkStore.savePosition(position, for: url, data: rawData, fileHash: fileHash, session: readingSession)
     }
 
     // MARK: - Search (OCR)
@@ -578,27 +568,23 @@ struct ComicReaderView: View {
         search.currentIndex = 0
         ocrPagesScanned = 0
 
+        search.error = nil
         ocrSearchTask = Task {
-            var matches: [Int] = []
-            for i in 0..<archive.pageCount {
-                if Task.isCancelled { return }
-                let contains = await OCRService.shared.pageContains(imageURL: archive.pages[i], query: query)
-                if Task.isCancelled { return }
-                if contains {
-                    matches.append(i)
+            do {
+                for (index, page) in archive.pages.enumerated() {
+                    try Task.checkCancellation()
+                    let contains = try await OCRService.shared.pageContains(imageURL: page, query: query)
+                    try Task.checkCancellation()
+                    ocrPagesScanned = index + 1
+                    if contains { searchMatchPages.append(index) }
                 }
-                await MainActor.run {
-                    if Task.isCancelled { return }
-                    ocrPagesScanned = i + 1
-                    searchMatchPages = matches
-                }
-            }
-            await MainActor.run {
-                if Task.isCancelled { return }
                 search.isSearching = false
-                if let first = matches.first {
-                    currentPage = first
-                }
+                if let first = searchMatchPages.first { currentPage = first }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled else { return }
+                search.isSearching = false
+                search.error = "Search could not finish. Results may be incomplete. \(error.localizedDescription)"
             }
         }
     }
@@ -633,33 +619,31 @@ struct ComicReaderView: View {
 
 
     private func selectAutomatic() {
-        viewMode = .paginated
-        twoUpOverride = nil
+
         readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
-        viewMode = .paginated
-        twoUpOverride = false
+
         readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
     private func selectTwoPage() {
-        viewMode = .paginated
-        twoUpOverride = true
+
         currentPage = PageNavigation.normalizedStart(
             current: currentPage, pageCount: archive.pageCount, twoUp: true)
         readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
     private func selectScrolling() {
-        viewMode = .scrolling
+
         readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 
     private func toggleTrim() {
-        trimWhitespace.toggle()
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.trimWhitespace = trimWhitespace }, applyGlobal: { readingPrefs.trimWhitespace = trimWhitespace })
+        let enabled = !trimWhitespace
+        readingPrefs.updatePreference(for: fileHash, apply: { $0.trimWhitespace = enabled },
+                                      applyGlobal: { readingPrefs.trimWhitespace = enabled })
     }
 
     private var currentModeIcon: String {

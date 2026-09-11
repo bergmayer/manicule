@@ -20,6 +20,7 @@ enum ZipExtractor: Sendable {
         var totalUncompressedSize: UInt64 = 0
 
         for entry in archive {
+            try Task.checkCancellation()
             entryCount += 1
             guard entryCount <= 100_000,
                   entry.uncompressedSize <= 1_073_741_824,

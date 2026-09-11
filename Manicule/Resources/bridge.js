@@ -6,7 +6,7 @@ const post = msg => window.webkit.messageHandlers.bridge.postMessage(msg)
 const origError = console.error
 console.error = (...args) => {
     origError.apply(console, args)
-    post({ type: 'error', message: 'console.error: ' + args.map(String).join(' ') })
+    post({ type: 'diagnostic', message: 'console.error: ' + args.map(String).join(' ') })
 }
 window.addEventListener('error', e => {
     post({ type: 'error', message: 'uncaught: ' + (e.message || String(e)) })
@@ -40,6 +40,7 @@ let marginsTwoUp = { tb: 0, lr: 0 }
 //   readAloudSeekTimer (300ms debounce) — fires after page-flip relayout settles,
 //       posting the seek offset to Swift. Cleared on section load to prevent stale seeks.
 //   readAloudLastPage — dedup guard; relocate handler ignores relayout noise.
+let readAloudRequestID = null
 let readAloudActive = false
 let currentSectionDoc = null
 let currentSectionIndex = -1
@@ -284,7 +285,7 @@ view.addEventListener('relocate', ({ detail }) => {
                 readAloudSeekTimer = setTimeout(() => {
                     const offset = getFirstVisibleTextOffset()
                     if (offset >= 0) {
-                        post({ type: 'readAloudSeek', offset, sectionIndex: currentSectionIndex })
+                        post({ type: 'readAloudSeek', requestID: readAloudRequestID, offset, sectionIndex: currentSectionIndex })
                     }
                 }, 300)
             }
@@ -305,7 +306,7 @@ view.addEventListener('load', ({ detail }) => {
         // Auto-advance: start from beginning; user navigation: start from visible text
         const isAutoAdvance = Date.now() < readAloudAutoAdvanceUntil
         const startOffset = isAutoAdvance ? 0 : Math.max(0, getFirstVisibleTextOffset())
-        post({ type: 'readAloudSectionText', text: readAloudText, sectionIndex: currentSectionIndex, startOffset })
+        post({ type: 'readAloudSectionText', requestID: readAloudRequestID, text: readAloudText, sectionIndex: currentSectionIndex, startOffset })
     }
 })
 
@@ -658,7 +659,7 @@ addWheelHandler(document)
 function buildTextNodeMap(doc) {
     const body = doc.body
     if (!body) {
-        post({ type: 'error', message: 'readAloud: doc.body is null' })
+        post({ type: 'diagnostic', message: 'readAloud: doc.body is null' })
         readAloudText = ''
         readAloudTextNodeMap = []
         return
@@ -732,7 +733,7 @@ function buildTextNodeMap(doc) {
     if (text.length === 0) {
         const fallback = (body.innerText || body.textContent || '').trim()
         if (fallback.length > 0) {
-            post({ type: 'error', message: 'readAloud: TreeWalker empty, falling back to innerText (' + fallback.length + ' chars)' })
+            post({ type: 'diagnostic', message: 'readAloud: TreeWalker empty, falling back to innerText (' + fallback.length + ' chars)' })
             readAloudText = fallback
             readAloudTextNodeMap = null  // no node map = no highlighting
             return
@@ -1194,7 +1195,7 @@ window.bridge = {
         })
     },
 
-    async search(query) {
+    async search(query, requestID) {
         // Generation counter — every new search or clear bumps it. The
         // async iterator below checks `myGen === searchGeneration` before
         // posting, so results from a superseded search never reach Swift
@@ -1209,15 +1210,15 @@ window.bridge = {
                 for (const sub of (item.subitems || [])) {
                     results.push({ cfi: sub.cfi, excerpt: sub.excerpt, label: item.label })
                 }
-                post({ type: 'searchResult', results: results.slice(), done: false })
+                post({ type: 'searchResult', requestID, results: results.slice(), done: false })
             }
             if (myGen === searchGeneration) {
-                post({ type: 'searchResult', results, done: true })
+                post({ type: 'searchResult', requestID, results, done: true })
             }
         } catch (e) {
             console.error('search failed:', e)
             if (myGen === searchGeneration) {
-                post({ type: 'searchResult', results: [], done: true })
+                post({ type: 'searchError', requestID, message: 'Search could not finish: ' + e.message })
             }
         }
     },
@@ -1296,7 +1297,8 @@ window.bridge = {
         viewportCenterRange = findCenterRange()
     },
 
-    startReadAloud() {
+    startReadAloud(requestID) {
+        readAloudRequestID = requestID
         readAloudActive = true
         readAloudUserFlipUntil = 0
         readAloudAutoAdvanceUntil = 0
@@ -1306,7 +1308,7 @@ window.bridge = {
             buildTextNodeMap(currentSectionDoc)
             injectReadAloudStyle(currentSectionDoc)
             const startOffset = Math.max(0, getFirstVisibleTextOffset())
-            post({ type: 'readAloudSectionText', text: readAloudText, sectionIndex: currentSectionIndex, startOffset })
+            post({ type: 'readAloudSectionText', requestID: readAloudRequestID, text: readAloudText, sectionIndex: currentSectionIndex, startOffset })
         }
     },
 

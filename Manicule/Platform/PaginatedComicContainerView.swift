@@ -1,6 +1,6 @@
 import SwiftUI
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
 import UIKit
 
 /// iOS comic reader paginated view. The container/coordinator boilerplate

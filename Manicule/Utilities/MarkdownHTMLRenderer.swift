@@ -11,12 +11,15 @@ enum MarkdownHTMLRenderer {
 
     nonisolated static func render(
         _ markdown: String,
-        headingAnchorPrefix: String? = nil
+        headingAnchorPrefix: String? = nil,
+        includeSourceLines: Bool = false
     ) -> String {
         var cursor = Cursor(lines: markdown.components(separatedBy: "\n"))
         var html: [String] = []
 
         while cursor.index < cursor.lines.count {
+            let sourceLine = cursor.index
+            let previousCount = html.count
             let trimmed = trim(cursor.lines[cursor.index])
             if trimmed.isEmpty {
                 cursor.index += 1
@@ -43,6 +46,10 @@ enum MarkdownHTMLRenderer {
                 html.append(renderList(cursor: &cursor, ordered: true))
             } else {
                 html.append(renderParagraph(cursor: &cursor))
+            }
+            if includeSourceLines, html.count > previousCount,
+               let end = html[html.count - 1].firstIndex(of: ">") {
+                html[html.count - 1].insert(contentsOf: " data-source-line=\"\(sourceLine)\"", at: end)
             }
         }
 

@@ -21,6 +21,20 @@ final class ReadAloudController: NSObject {
 
     // MARK: - Public State
 
+    private(set) var owner: UUID?
+    var onOwnerReleased: (() -> Void)?
+
+    func claim(for owner: UUID) {
+        guard self.owner != owner else { return }
+        dismiss()
+        self.owner = owner
+    }
+
+    func dismiss(for owner: UUID) {
+        guard self.owner == owner else { return }
+        dismiss()
+    }
+
     private(set) var isActive = false
     private(set) var isPlaying = false
     /// True when TTS finished speaking all loaded text naturally (not paused by user).
@@ -76,7 +90,7 @@ final class ReadAloudController: NSObject {
     private var remoteCommandsConfigured = false
     private var silentPlayer: AVAudioPlayer?
 
-    override private init() {
+    override init() {
         super.init()
         let stored = UserDefaults.standard.double(forKey: DefaultsKey.speed)
         speed = max(0.5, stored.nonZero(or: 1.0))
@@ -145,6 +159,10 @@ final class ReadAloudController: NSObject {
 
     /// Dismiss controls entirely.
     func dismiss() {
+        let hadAudioSession = isActive
+        owner = nil
+        onOwnerReleased?()
+        onOwnerReleased = nil
         onHighlightCleared?()
         cancelSpeech()
         isActive = false
@@ -162,7 +180,9 @@ final class ReadAloudController: NSObject {
         stopSilentPlayer()
         tearDownRemoteCommands()
         // Deactivation failure is non-fatal; the session cleans up when the app backgrounds.
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if hadAudioSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 
     // MARK: - Audio Session & Now Playing
@@ -284,7 +304,7 @@ final class ReadAloudController: NSObject {
 
     /// Seek to offset (e.g. from bridge page navigation).
     func seekTo(offset: Int) {
-        guard isActive, offset < (fullText as NSString).length else { return }
+        guard isActive, offset >= 0, offset < (fullText as NSString).length else { return }
         lastSpokenWordLocation = offset
         if isPlaying {
             cancelSpeech()
@@ -297,7 +317,7 @@ final class ReadAloudController: NSObject {
     /// if isPlaying, but if TTS finished during the debounce window, isPlaying
     /// is false and seekTo only updates position — this method resumes in that case.
     func seekAndResume(offset: Int) {
-        guard isActive, offset < (fullText as NSString).length else { return }
+        guard isActive, offset >= 0, offset < (fullText as NSString).length else { return }
         let wasPlaying = isPlaying
         seekTo(offset: offset)
         if wasPlaying && !isPlaying {
@@ -331,7 +351,7 @@ final class ReadAloudController: NSObject {
     }
 
     private func cancelSpeech() {
-        provider.stop()
+        _provider?.stop()
     }
 
     private func speakFrom(offset: Int) {

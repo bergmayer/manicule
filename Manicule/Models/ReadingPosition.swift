@@ -5,36 +5,43 @@ enum ReadingPosition: Codable, Sendable, Equatable {
     case pdfPage(Int)
     case epubSpine(index: Int, scrollFraction: Double)
     case epubCFI(String, fraction: Double)
-    case textOffset(Int)
+    case textOffset(Int) // Legacy fraction multiplied by 1000.
+    case textAnchor(TextAnchor, fraction: Double)
     case comicPage(Int)
 
     var displayString: String {
         switch self {
         case .pdfPage(let page):
-            return "Page \(page + 1)"
+            return "Page \(page == Int.max ? Int.max : max(0, page) + 1)"
         case .epubSpine(let index, _):
-            return "Chapter \(index + 1)"
+            return "Chapter \(index == Int.max ? Int.max : max(0, index) + 1)"
         case .epubCFI(_, let fraction):
-            return "\(Int(fraction * 100))%"
+            return "\(Int(Self.validFraction(fraction) * 100))%"
+        case .textAnchor(let anchor, _):
+            return "Line \(anchor.line + 1)"
         case .textOffset(let offset):
             return "Position \(offset)"
         case .comicPage(let page):
-            return "Page \(page + 1)"
+            return "Page \(page == Int.max ? Int.max : max(0, page) + 1)"
         }
+    }
+
+    private static func validFraction(_ value: Double) -> Double {
+        value.isFinite ? min(1, max(0, value)) : 0
     }
 
     /// Extracts a global fraction for approximate position restoration.
     var epubFraction: Double? {
         switch self {
-        case .epubCFI(_, let fraction): return fraction
-        case .epubSpine(_, let fraction): return fraction
+        case .epubCFI(_, let fraction): return Self.validFraction(fraction)
+        case .epubSpine(_, let fraction): return Self.validFraction(fraction)
         default: return nil
         }
     }
 }
 
 /// An automatically saved reading position for a book.
-struct AutoSavedPosition: Codable, Identifiable, Sendable {
+struct AutoSavedPosition: Codable, Identifiable, Sendable, Equatable {
     var id: String          // fileHash
     var fileName: String
     var position: ReadingPosition
@@ -86,7 +93,7 @@ struct RelocateEvent {
 }
 
 /// A saved bookmark entry for a specific file.
-struct BookmarkEntry: Codable, Identifiable, Sendable {
+struct BookmarkEntry: Codable, Identifiable, Sendable, Equatable {
     let id: String          // Unique ID (UUID string)
     var fileHash: String    // SHA256 hash — groups bookmarks per book
     var fileName: String    // Display name
@@ -104,7 +111,7 @@ struct BookmarkEntry: Codable, Identifiable, Sendable {
             self.fileHash = hash
         } else {
             // Legacy entry: id was the file hash
-            self.id = UUID().uuidString
+            self.id = "legacy-" + rawId
             self.fileHash = rawId
         }
         self.fileName = try container.decode(String.self, forKey: .fileName)
@@ -120,5 +127,41 @@ struct BookmarkEntry: Codable, Identifiable, Sendable {
         self.position = position
         self.lastOpened = lastOpened
         self.tocLabel = tocLabel
+    }
+}
+
+/// A source block and a short passage within it, independent of screen layout.
+/// UTF-16 offset disambiguates repeated passages within the same block.
+struct TextAnchor: Codable, Sendable, Equatable {
+    let line: Int
+    let offset: Int
+    let quote: String
+
+    private enum CodingKeys: String, CodingKey { case line, offset, quote }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(line: try values.decode(Int.self, forKey: .line),
+                  offset: try values.decode(Int.self, forKey: .offset),
+                  quote: try values.decode(String.self, forKey: .quote))
+    }
+
+    init(line: Int, offset: Int = 0, quote: String = "") {
+        self.line = min(max(0, line), Int.max - 1)
+        self.offset = max(0, offset)
+        self.quote = String(quote.prefix(80))
+    }
+}
+
+extension ReadingPosition {
+    var textFraction: Double? {
+        switch self {
+        case .textOffset(let offset): return min(1, max(0, Double(offset) / 1000))
+        case .textAnchor(_, let fraction): return fraction.isFinite ? min(1, max(0, fraction)) : 0
+        default: return nil
+        }
+    }
+    var textAnchor: TextAnchor? {
+        if case .textAnchor(let anchor, _) = self { return anchor }
+        return nil
     }
 }

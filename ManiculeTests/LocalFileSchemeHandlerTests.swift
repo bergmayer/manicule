@@ -117,3 +117,70 @@ final class ReaderThemeTests: XCTestCase {
         XCTAssertEqual(ReaderTheme.phosphorGreen.cssBackground, "#000c00")
     }
 }
+
+import WebKit
+
+@MainActor
+final class SchemeRequestLifecycleTests: XCTestCase {
+    private final class Request: NSObject, WKURLSchemeTask {
+        let request: URLRequest
+        var response: URLResponse?
+        var bytes = Data()
+        var error: Error?
+        let completion: XCTestExpectation
+
+        init(url: URL, completion: XCTestExpectation) {
+            request = URLRequest(url: url)
+            self.completion = completion
+        }
+        func didReceive(_ response: URLResponse) { self.response = response }
+        func didReceive(_ data: Data) { bytes.append(data) }
+        func didFinish() { completion.fulfill() }
+        func didFailWithError(_ error: any Error) { self.error = error; completion.fulfill() }
+    }
+
+    func testLocalFetchPreservesHTTPStatusCharsetAndBytes() async throws {
+        let directory = try TemporaryDirectoryLease.writing(Data("Café 👋".utf8), filename: "content.html")
+        let handler = LocalFileSchemeHandler(baseURL: directory.url)
+        handler.resourceLease = directory
+        let done = expectation(description: "Local resource finished")
+        var components = URLComponents()
+        components.scheme = "epub-local"
+        components.host = "local"
+        components.path = directory.url.appendingPathComponent("content.html").path
+        let request = Request(url: try XCTUnwrap(components.url), completion: done)
+        handler.webView(WKWebView(), start: request)
+        await fulfillment(of: [done], timeout: 5)
+        XCTAssertNil(request.error)
+        XCTAssertEqual((request.response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(request.response?.textEncodingName, "utf-8")
+        XCTAssertEqual(request.bytes, Data("Café 👋".utf8))
+    }
+
+    func testStoppedRequestDoesNotCallWebKitAgain() async throws {
+        let directory = try TemporaryDirectoryLease.writing(Data("resource".utf8), filename: "content.html")
+        let handler = LocalFileSchemeHandler(baseURL: directory.url)
+        let completed = expectation(description: "Stopped request must not complete")
+        completed.isInverted = true
+        let request = Request(url: URL(string: "epub-local://document/content.html")!, completion: completed)
+        handler.documentResourceURL = directory.url
+        let webView = WKWebView()
+        handler.webView(webView, start: request)
+        handler.webView(webView, stop: request)
+        await fulfillment(of: [completed], timeout: 0.2)
+        XCTAssertNil(request.response)
+        XCTAssertTrue(request.bytes.isEmpty)
+    }
+
+    func testRendererTerminationIsReportedOnceWithoutAutomaticReload() {
+        let coordinator = WebViewCoordinator()
+        let webView = WKWebView()
+        var failures: [String] = []
+        coordinator.onFailure = { failures.append($0) }
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertFalse(webView.isLoading)
+        coordinator.tearDown()
+    }
+}

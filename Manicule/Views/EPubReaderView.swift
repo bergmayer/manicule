@@ -13,21 +13,11 @@ struct EPubReaderView: View {
     let book: EPubBook
     let fileURL: URL?
     let rawData: Data
+    @Environment(\.readingSession) private var readingSession
+    let fileHash: String
     @Binding var showChrome: Bool
     var onClose: (() -> Void)?
 
-    private let fileHash: String?
-
-    init(book: EPubBook, fileURL: URL?, rawData: Data, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
-        self.book = book
-        self.fileURL = fileURL
-        self.rawData = rawData
-        self._showChrome = showChrome
-        self.onClose = onClose
-        self.fileHash = fileHash ?? FileHasher.hash(data: rawData)
-    }
-
-    // Navigation state from foliate-js relocate events
     @State private var currentFraction: Double = 0.0
     @State private var currentCFI: String?
     @State private var currentTOCLabel: String?
@@ -42,19 +32,26 @@ struct EPubReaderView: View {
     @State private var showTOC: Bool = false
     @State private var showBookmarks: Bool = false
     @State private var showSettings: Bool = false
-    @State private var viewMode: ViewMode = .paginated
-    @State private var twoUpOverride: Bool?
+    private var viewMode: ViewMode { readingPrefs.effective(for: fileHash).viewMode }
+    private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
-    @State private var bookTempURL: URL?
+    @State private var bookDirectory: TemporaryDirectoryLease?
+    @State private var bookLoadError: String?
+    @State private var loadAttempt = UUID()
+    @State private var positionRestoreTask: Task<Void, Never>?
+    private var bookTempURL: URL? { bookDirectory?.url.appendingPathComponent("book.epub") }
 
     @State private var fastScroll = FastScrollController()
 
     // Read-aloud state (iOS only)
     #if os(iOS) || os(visionOS)
     private let readAloud = ReadAloudController.shared
+    @State private var narrationOwner = UUID()
+    private var ownsNarration: Bool { readAloud.owner == narrationOwner }
+    private var narrationIsActive: Bool { ownsNarration && readAloud.isActive }
     @State private var readAloudSectionIndex: Int = -1
     @State private var readAloudEmptySections: Int = 0
     @State private var readAloudLastSeekTime: Date = .distantPast
@@ -97,7 +94,7 @@ struct EPubReaderView: View {
         epubLayoutWithToolbar
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
-                    BookmarkPickerView(fileHash: fileHash ?? "") { position in
+                    BookmarkPickerView(fileHash: fileHash) { position in
                         if case .epubCFI(let cfi, _) = position, !cfi.isEmpty {
                             webViewProxy.goTo?(cfi)
                         }
@@ -113,6 +110,15 @@ struct EPubReaderView: View {
             // The bridge owns per-orientation margin selection — when the user
             // edits either pair in Reading Settings we re-send both, and the
             // bridge picks the matching one based on its resolved column count.
+            .readerSearchError($search.error)
+            .onChange(of: viewMode) { _, _ in
+                webViewProxy.setFlow?(isPaginated ? "paginated" : "scrolled")
+                restoreCurrentPosition()
+            }
+            .onChange(of: twoUpOverride) { _, value in
+                webViewProxy.setColumnCount?(ReaderHelpers.resolveColumnCountForBridge(value))
+                restoreCurrentPosition()
+            }
             .onChange(of: marginPairs) { _, _ in
                 sendBothMargins()
             }
@@ -125,47 +131,44 @@ struct EPubReaderView: View {
             .toolbar { epubToolbar }
             #endif
             .fullScreenToolbarAutoHide(showChrome: $showChrome)
-            .onChange(of: showTOC) { _, isShowing in
-                guard !isShowing else { return }
-                Task { @MainActor in
-                    // Let the sidebar transition and the activating tap finish
-                    // before returning keyboard focus to the reader.
-                    try? await Task.sleep(for: .milliseconds(300))
-                    guard !showTOC else { return }
-                    webViewProxy.refocus?()
-                }
+            .task(id: showTOC) {
+                guard !showTOC else { return }
+                do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+                webViewProxy.refocus?()
             }
-            .task {
+            .task(id: loadAttempt) {
                 ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
-                let eff = readingPrefs.effective(for: fileHash)
-                viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp
                 wireFastScrollAnimationSuppression()
                 let bookData = rawData
-                bookTempURL = await Task.detached(priority: .utility) {
-                    let directory = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("manicule-epub-session-\(UUID().uuidString)")
-                    let file = directory.appendingPathComponent("book.epub")
-                    do {
-                        try FileManager.default.createDirectory(
-                            at: directory, withIntermediateDirectories: true)
-                        try bookData.write(to: file, options: .atomic)
-                        return file
-                    } catch {
-                        try? FileManager.default.removeItem(at: directory)
-                        return nil
+                bookDirectory = nil
+                bookLoadError = nil
+                bridgeReady = false
+                do {
+                    let worker = Task.detached(priority: .utility) {
+                        try Task.checkCancellation()
+                        return try TemporaryDirectoryLease.writing(bookData, filename: "book.epub")
                     }
-                }.value
+                    let directory = try await withTaskCancellationHandler {
+                        try await worker.value
+                    } onCancel: { worker.cancel() }
+                    try Task.checkCancellation()
+                    bookDirectory = directory
+                } catch is CancellationError {
+                    // The local lease releases any completed temporary file.
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    bookLoadError = error.localizedDescription
+                }
             }
             .onDisappear {
                 autoSavePosition()
-                if let directory = bookTempURL?.deletingLastPathComponent() {
-                    try? FileManager.default.removeItem(at: directory)
-                }
-                bookTempURL = nil
+                searchDebouncer.cancel()
+                positionRestoreTask?.cancel()
+                webViewProxy.clearSearch?()
+                bookDirectory = nil
                 #if os(iOS) || os(visionOS)
-                if readAloud.isActive { readAloud.dismiss() }
+                readAloud.dismiss(for: narrationOwner)
                 #endif
             }
     }
@@ -195,6 +198,7 @@ struct EPubReaderView: View {
             .onReaderCommand(.toggleReadAloud, perform: toggleReadAloud)
             #endif
             .onChange(of: search.query) { _, newQuery in
+                clearEPubSearch()
                 searchDebouncer.handle(newQuery, perform: performEPubSearch, clear: clearEPubSearch)
             }
     }
@@ -217,7 +221,7 @@ struct EPubReaderView: View {
                         TableOfContentsView(
                             entries: book.tableOfContents,
                             currentTOCLabel: currentTOCLabel,
-                            bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash ?? "").compactMap(\.tocLabel)),
+                            bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash).compactMap(\.tocLabel)),
                             onSelect: { entry in
                                 navigateToTOCEntry(entry)
                             }
@@ -271,7 +275,7 @@ struct EPubReaderView: View {
                 TableOfContentsView(
                     entries: book.tableOfContents,
                     currentTOCLabel: currentTOCLabel,
-                    bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash ?? "").compactMap(\.tocLabel)),
+                    bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash).compactMap(\.tocLabel)),
                     onSelect: { entry in
                         navigateToTOCEntry(entry)
                         showTOC = false
@@ -320,7 +324,7 @@ struct EPubReaderView: View {
         // Bottom chrome overlays (no reflow)
         .overlay(alignment: .bottom) {
             if showChrome {
-                if readAloud.isActive {
+                if narrationIsActive {
                     ReadAloudBarView(controller: readAloud) {
                         dismissReadAloud()
                     }
@@ -344,7 +348,7 @@ struct EPubReaderView: View {
 
     @ViewBuilder
     private var epubContent: some View {
-        if let bookTempURL {
+        if let bookTempURL, bookLoadError == nil {
             WebViewRepresentable(
                 content: WebViewContent(
                     fileURL: URL(fileURLWithPath: "/"),
@@ -354,7 +358,8 @@ struct EPubReaderView: View {
                     cssOverride: nil,
                     paginated: isPaginated,
                     isEPub: true,
-                    bookFileURL: bookTempURL
+                    bookFileURL: bookTempURL,
+                    resourceLease: bookDirectory
                 ),
                 proxy: webViewProxy,
                 onScrollPositionChange: { fraction in
@@ -379,7 +384,15 @@ struct EPubReaderView: View {
                     }
                 },
                 onReadAloudSectionText: readAloudSectionTextHandler,
-                onReadAloudSeek: readAloudSeekHandler
+                onReadAloudSeek: readAloudSeekHandler,
+                onFailure: { message in
+                    search.isSearching = false
+                    bookLoadError = message
+                },
+                onSearchFailure: { message in
+                    search.isSearching = false
+                    search.error = message
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             #if os(macOS)
@@ -392,6 +405,14 @@ struct EPubReaderView: View {
                 }
             }
             #endif
+        } else if let bookLoadError {
+            ContentUnavailableView {
+                Label("Unable to Display ePub", systemImage: "book.closed")
+            } description: {
+                Text(bookLoadError)
+            } actions: {
+                Button("Retry") { loadAttempt = UUID() }
+            }
         } else {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -490,7 +511,7 @@ struct EPubReaderView: View {
                 }
 
                 if let onClose {
-                    if readAloud.isActive {
+                    if narrationIsActive {
                         Button {
                             // Full teardown — also exits the bridge's read-aloud
                             // mode, not just the controller.
@@ -543,8 +564,8 @@ struct EPubReaderView: View {
                 }
                 Section {
                     Button { toggleReadAloud() } label: {
-                        Label(readAloud.isActive ? "Stop Read Aloud" : "Read Aloud",
-                              systemImage: readAloud.isActive ? "speaker.slash" : "speaker.wave.2")
+                        Label(narrationIsActive ? "Stop Read Aloud" : "Read Aloud",
+                              systemImage: narrationIsActive ? "speaker.slash" : "speaker.wave.2")
                     }
                 }
                 Section {
@@ -634,10 +655,10 @@ struct EPubReaderView: View {
 
         // Load position for restoration: auto-saved position first, then manual bookmarks
         let lastCFI: String?
-        if let hash = fileHash, let autoSaved = bookmarkStore.savedPosition(for: hash),
+        if let autoSaved = bookmarkStore.savedPosition(for: fileHash),
            case .epubCFI(let cfi, _) = autoSaved.position, !cfi.isEmpty {
             lastCFI = cfi
-        } else if let mostRecent = bookmarkStore.bookmarks(for: fileHash ?? "").first {
+        } else if let mostRecent = bookmarkStore.bookmarks(for: fileHash).first {
             switch mostRecent.position {
             case .epubCFI(let cfi, _) where !cfi.isEmpty:
                 lastCFI = cfi
@@ -671,9 +692,8 @@ struct EPubReaderView: View {
     }
 
     private var isCurrentPositionBookmarked: Bool {
-        guard let hash = fileHash else { return false }
         let position: ReadingPosition = .epubCFI(currentCFI ?? "", fraction: currentFraction)
-        return bookmarkStore.isPositionBookmarked(fileHash: hash, position: position)
+        return bookmarkStore.isPositionBookmarked(fileHash: fileHash, position: position)
     }
 
     private func toggleBookmark() {
@@ -691,7 +711,7 @@ struct EPubReaderView: View {
         let position: ReadingPosition = .epubCFI(cfi, fraction: currentFraction)
         bookmarkStore.savePosition(
             position, for: url, data: rawData,
-            tocLabel: currentTOCLabel, fileHash: fileHash
+            tocLabel: currentTOCLabel, fileHash: fileHash, session: readingSession
         )
     }
 
@@ -761,10 +781,12 @@ struct EPubReaderView: View {
     }
 
     private func toggleReadAloud() {
-        if readAloud.isActive {
+        if narrationIsActive {
             dismissReadAloud()
             return
         }
+        readAloud.claim(for: narrationOwner)
+        readAloud.onOwnerReleased = { [weak webViewProxy] in webViewProxy?.stopReadAloud?() }
         // Extract text from current section — will arrive via handleReadAloudSectionText
         webViewProxy.startReadAloud?()
     }
@@ -772,7 +794,7 @@ struct EPubReaderView: View {
     private func dismissReadAloud() {
         // Capture center anchor before bar disappears (changes WebView height)
         webViewProxy.clearReadAloud?()
-        readAloud.dismiss()
+        readAloud.dismiss(for: narrationOwner)
         webViewProxy.stopReadAloud?()
         readAloudSectionIndex = -1
     }
@@ -794,7 +816,7 @@ struct EPubReaderView: View {
     }
 
     private func handleReadAloudSectionText(_ text: String, sectionIndex: Int, startOffset: Int = 0) {
-        guard sectionIndex >= 0 else { return }
+        guard ownsNarration, sectionIndex >= 0 else { return }
         readAloudSectionIndex = sectionIndex
 
         let cleaned = text
@@ -819,7 +841,7 @@ struct EPubReaderView: View {
         webViewProxy.clearReadAloud?()
 
         let wasPlaying = readAloud.isPlaying
-        let wasActive = readAloud.isActive
+        let wasActive = narrationIsActive
         let wasNaturalFinish = readAloud.sectionFinishedNaturally
         readAloud.loadText(text, startOffset: startOffset)
         setupReadAloudCallbacks()
@@ -830,7 +852,7 @@ struct EPubReaderView: View {
     }
 
     private func handleReadAloudSeek(_ offset: Int, sectionIndex: Int) {
-        guard readAloud.isActive else { return }
+        guard narrationIsActive else { return }
         let now = Date()
         guard now.timeIntervalSince(readAloudLastSeekTime) > 0.3 else { return }
         if sectionIndex == readAloudSectionIndex {
@@ -856,55 +878,31 @@ struct EPubReaderView: View {
     // so these handlers only need to update the column preference and reading-mode
     // flow — margins flow in via .onChange(of: marginPairs) and openAndInit.
     private func selectAutomatic() {
-        let wasScrolling = !isPaginated
-        viewMode = .paginated
-        twoUpOverride = nil
-        if wasScrolling { webViewProxy.setFlow?("paginated") }
-        webViewProxy.setColumnCount?(ReaderHelpers.resolveColumnCountForBridge(nil))
-        restoreCurrentPosition()
         readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
-        let wasScrolling = !isPaginated
-        viewMode = .paginated
-        twoUpOverride = false
-        if wasScrolling { webViewProxy.setFlow?("paginated") }
-        webViewProxy.setColumnCount?(1)
-        restoreCurrentPosition()
         readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
     private func selectTwoPage() {
-        let wasScrolling = !isPaginated
-        viewMode = .paginated
-        twoUpOverride = true
-        if wasScrolling { webViewProxy.setFlow?("paginated") }
-        webViewProxy.setColumnCount?(2)
-        restoreCurrentPosition()
         readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
     private func selectScrolling() {
-        viewMode = .scrolling
-        webViewProxy.setFlow?("scrolled")
-        restoreCurrentPosition()
         readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 
     /// Restore reading position after a mode switch (scroll/1-up/2-up).
     /// Uses a small delay to let the renderer relayout after the mode change.
     private func restoreCurrentPosition() {
-        if let cfi = currentCFI, !cfi.isEmpty {
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(100))
-                webViewProxy.goTo?(cfi)
-            }
-        } else if currentFraction > 0 {
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(100))
-                webViewProxy.goToFraction?(currentFraction)
-            }
+        positionRestoreTask?.cancel()
+        let cfi = currentCFI
+        let fraction = currentFraction
+        positionRestoreTask = Task {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            if let cfi, !cfi.isEmpty { webViewProxy.goTo?(cfi) }
+            else if fraction > 0 { webViewProxy.goToFraction?(fraction) }
         }
     }
 }

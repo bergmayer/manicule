@@ -139,13 +139,13 @@ enum ReaderHelpers {
         // Auto-saved first
         if let autoSaved = store.savedPosition(for: hash),
            let page = extract(autoSaved.position),
-           page < pageCount {
+           (0..<pageCount).contains(page) {
             return page
         }
         // Then manual bookmarks
         if let mostRecent = store.bookmarks(for: hash).first,
            let page = extract(mostRecent.position),
-           page < pageCount {
+           (0..<pageCount).contains(page) {
             return page
         }
         return nil

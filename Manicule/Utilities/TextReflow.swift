@@ -6,7 +6,7 @@ import Foundation
 /// Hard-wrapped text (typically at 70-80 characters) is merged into flowing paragraphs.
 /// Structural elements like headers, poetry, indented blocks, and paragraph boundaries
 /// are preserved.
-enum TextReflow {
+nonisolated enum TextReflow {
 
     /// Reflows hard-wrapped plain text into flowing paragraphs.
     ///

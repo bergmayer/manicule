@@ -1,56 +1,24 @@
 import SwiftUI
 import PDFKit
-import ImageIO
-import UniformTypeIdentifiers
 
+// A newly constructed PDFDocument is transferred once to the main actor.
+// It is never accessed again by the loading task.
 private struct LoadedPDFDocument: @unchecked Sendable {
     let document: PDFDocument?
-}
-
-private nonisolated func writePDFOCRThumbnail(
-    document: PDFDocument,
-    pageIndex: Int,
-    to url: URL
-) -> Bool {
-    guard let page = document.page(at: pageIndex) else { return false }
-    let bounds = page.bounds(for: .mediaBox)
-    let size = CGSize(
-        width: min(bounds.width * 2, 2_000),
-        height: min(bounds.height * 2, 2_000)
-    )
-    let thumbnail = page.thumbnail(of: size, for: .mediaBox)
-    #if canImport(UIKit)
-    guard let image = thumbnail.cgImage else { return false }
-    #else
-    guard let image = thumbnail.cgImage(
-        forProposedRect: nil, context: nil, hints: nil) else { return false }
-    #endif
-    guard let destination = CGImageDestinationCreateWithURL(
-        url as CFURL, UTType.png.identifier as CFString, 1, nil
-    ) else { return false }
-    CGImageDestinationAddImage(destination, image, nil)
-    return CGImageDestinationFinalize(destination)
 }
 
 /// Displays a PDF document with page navigation, thumbnail sidebar, and bookmark toggle.
 struct PDFReaderView: View {
     let data: Data
     let fileURL: URL?
+    @Environment(\.readingSession) private var readingSession
+    let fileHash: String
     @Binding var showChrome: Bool
     var onClose: (() -> Void)?
 
-    private let fileHash: String?
-
-    init(data: Data, fileURL: URL?, fileHash: String? = nil, showChrome: Binding<Bool>, onClose: (() -> Void)? = nil) {
-        self.data = data
-        self.fileURL = fileURL
-        self._showChrome = showChrome
-        self.onClose = onClose
-        self.fileHash = fileHash ?? FileHasher.hash(data: data)
-    }
-
     @State private var currentPageIndex: Int = 0
     @State private var pdfDocument: PDFDocument?
+    @State private var pageRenderer: PDFPageRenderer?
     @State private var didAttemptLoad: Bool = false
     @State private var pageCount: Int = 0
     @State private var showGoToPage: Bool = false
@@ -58,12 +26,12 @@ struct PDFReaderView: View {
     @State private var showBookmarks: Bool = false
     @State private var showSettings: Bool = false
     @State private var showThumbnails: Bool = false
-    @State private var viewMode: ViewMode = .paginated
-    @State private var trimWhitespace: Bool = false
+    private var viewMode: ViewMode { readingPrefs.effective(for: fileHash).viewMode }
+    private var trimWhitespace: Bool { readingPrefs.effective(for: fileHash).trimWhitespace }
     @State private var originalPDFBounds: [Int: CGRect] = [:]
     @State private var trimmedPages: Set<Int> = []
     @State private var trimTask: Task<Void, Never>?
-    @State private var twoUpOverride: Bool? = nil
+    private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
     @State private var zoomScale: Double? = nil
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
@@ -76,11 +44,13 @@ struct PDFReaderView: View {
 
     // Search state
     @State private var search = ReaderSearchState()
-    @State private var searchSelections: [PDFSelection] = []
-    @State private var ocrMatchPages: [Int] = []
-    @State private var usingOCR = false
+    private enum SearchResult {
+        case text(PDFSelection)
+        case imagePage(Int)
+    }
+    @State private var searchResults: [SearchResult] = []
     @State private var searchDebouncer = SearchDebouncer()
-    @State private var ocrSearchTask: Task<Void, Never>?
+    @State private var searchTask: Task<Void, Never>?
 
     @FocusState private var isFocused: Bool
 
@@ -89,13 +59,6 @@ struct PDFReaderView: View {
 
     private var isPaginated: Bool {
         viewMode == .paginated
-    }
-
-    /// PDFKit renders the original PDF pages directly in every mode. Trimming
-    /// therefore uses non-destructive crop-box changes rather than rasterizing
-    /// pages into images.
-    private var usesCropBoxTrimming: Bool {
-        true
     }
 
     private var effectiveTwoUp: Bool {
@@ -112,14 +75,19 @@ struct PDFReaderView: View {
             .task {
                 ReaderHelpers.migrateLegacyIdentity(data: data, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
-                let eff = readingPrefs.effective(for: fileHash)
-                viewMode = eff.viewMode
-                twoUpOverride = eff.twoUp
-                trimWhitespace = eff.trimWhitespace
+
                 await loadDocument()
             }
+            .onChange(of: trimWhitespace) { _, enabled in
+                if enabled { applyTrimCropBoxes() } else { restoreOriginalCropBoxes() }
+            }
+            .readerSearchError($search.error)
             .onDisappear {
                 autoSavePosition()
+                trimTask?.cancel()
+                trimTask = nil
+                searchDebouncer.cancel()
+                clearPdfSearch()
             }
             .readerCommands(ReaderCommandHandlers(
                 onToggleViewMode: { if isPaginated { selectScrolling() } else { selectSinglePage() } },
@@ -138,6 +106,7 @@ struct PDFReaderView: View {
                 showGoToPage = true
             }
             .onChange(of: search.query) { _, newQuery in
+                clearPdfSearch()
                 searchDebouncer.handle(newQuery, perform: performPdfSearch, clear: clearPdfSearch)
             }
             .onChange(of: currentPageIndex) { _, newPage in
@@ -147,7 +116,7 @@ struct PDFReaderView: View {
                     currentPageIndex = normalized
                     return
                 }
-                if trimWhitespace && usesCropBoxTrimming && isPaginated { trimPagesAround(newPage) }
+                if trimWhitespace && isPaginated { trimPagesAround(newPage) }
                 autoSavePosition()
             }
             .onChange(of: effectiveTwoUp) { _, isTwoUp in
@@ -171,8 +140,8 @@ struct PDFReaderView: View {
             }
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
-                    BookmarkPickerView(fileHash: fileHash ?? "") { position in
-                        if case .pdfPage(let page) = position, page < pageCount {
+                    BookmarkPickerView(fileHash: fileHash) { position in
+                        if case .pdfPage(let page) = position, (0..<pageCount).contains(page) {
                             currentPageIndex = page
                         }
                     }
@@ -191,6 +160,7 @@ struct PDFReaderView: View {
             if showThumbnails {
                 PDFThumbnailSidebar(
                     pdfDocument: pdfDocument,
+                    pageRenderer: pageRenderer,
                     currentPageIndex: $currentPageIndex,
                     bookmarkedPages: bookmarkedPdfPages
                 )
@@ -299,8 +269,9 @@ struct PDFReaderView: View {
     // MARK: - Content
 
     private var currentHighlightSelection: PDFSelection? {
-        guard !usingOCR, search.currentIndex < searchSelections.count else { return nil }
-        return searchSelections[search.currentIndex]
+        guard searchResults.indices.contains(search.currentIndex),
+              case .text(let selection) = searchResults[search.currentIndex] else { return nil }
+        return selection
     }
 
     @ViewBuilder
@@ -515,15 +486,14 @@ struct PDFReaderView: View {
     }
 
     private var bookmarkedPdfPages: Set<Int> {
-        Set(bookmarkStore.bookmarks(for: fileHash ?? "").compactMap { entry -> Int? in
+        Set(bookmarkStore.bookmarks(for: fileHash).compactMap { entry -> Int? in
             if case .pdfPage(let page) = entry.position { return page }
             return nil
         })
     }
 
     private var isCurrentPositionBookmarked: Bool {
-        guard let hash = fileHash else { return false }
-        return bookmarkStore.isPositionBookmarked(fileHash: hash, position: .pdfPage(currentPageIndex))
+        return bookmarkStore.isPositionBookmarked(fileHash: fileHash, position: .pdfPage(currentPageIndex))
     }
 
     private var pageLabel: String {
@@ -543,19 +513,17 @@ struct PDFReaderView: View {
     }
 
     private func loadDocument() async {
-        // Prefer URL-based loading — PDFKit memory-maps the file, instant even for 100MB+ PDFs.
-        // Fall back to data-based loading when no URL is available.
-        let sourceURL = fileURL
+        // Render the same immutable snapshot used for the document hash.
+        // Reopening the URL could silently display an externally replaced file.
         let sourceData = data
         let loaded = await Task.detached(priority: .userInitiated) {
-            LoadedPDFDocument(
-                document: sourceURL.flatMap { PDFDocument(url: $0) }
-                    ?? PDFDocument(data: sourceData)
-            )
+            LoadedPDFDocument(document: PDFDocument(data: sourceData))
         }.value
+        guard !Task.isCancelled else { return }
         didAttemptLoad = true
         guard let doc = loaded.document else { return }
 
+        pageRenderer = PDFPageRenderer(data: sourceData, fileHash: fileHash)
         pdfDocument = doc
         pageCount = doc.pageCount
 
@@ -566,95 +534,62 @@ struct PDFReaderView: View {
             currentPageIndex = page
         }
 
-        if trimWhitespace && usesCropBoxTrimming {
+        if trimWhitespace {
             applyTrimCropBoxes()
         }
     }
 
     // MARK: - Search
 
-    private var pdfSearchResultCount: Int {
-        usingOCR ? ocrMatchPages.count : searchSelections.count
-    }
+    private var pdfSearchResultCount: Int { searchResults.count }
 
     private func performPdfSearch(_ query: String) {
-        guard let doc = pdfDocument else {
-            clearPdfSearch()
-            return
-        }
-        // Cancel any in-flight OCR scan from a previous query.
-        ocrSearchTask?.cancel()
-        ocrSearchTask = nil
-
+        clearPdfSearch()
+        guard let doc = pdfDocument, let renderer = pageRenderer else { return }
         search.isSearching = true
-        usingOCR = false
-        ocrMatchPages = []
-
-        // First try PDFKit text search
-        let selections = doc.findString(query, withOptions: [.caseInsensitive])
-        searchSelections = selections
-        search.currentIndex = 0
-
-        if !selections.isEmpty {
-            search.isSearching = false
-            if let first = selections.first {
-                navigateToSelection(first)
+        searchTask = Task {
+            do {
+                let matches = try await renderer.search(query)
+                try Task.checkCancellation()
+                searchResults = matches.compactMap { ranges in
+                    let selection = PDFSelection(document: doc)
+                    for match in ranges {
+                        if let part = doc.page(at: match.pageIndex)?.selection(for: match.range) {
+                            selection.add(part)
+                        }
+                    }
+                    return selection.pages.isEmpty ? nil : .text(selection)
+                }
+                // Image-only documents still get OCR when the text layer has no matches.
+                if searchResults.isEmpty {
+                    for index in 0..<doc.pageCount {
+                        try Task.checkCancellation()
+                        let image = try await renderer.ocrImage(at: index)
+                        let contains = try await OCRService.shared.pageContains(
+                            image: image, fileHash: fileHash, pageIndex: index, query: query)
+                        try Task.checkCancellation()
+                        if contains { searchResults.append(.imagePage(index)) }
+                    }
+                }
+                search.isSearching = false
+                showPdfSearchResult()
+            } catch is CancellationError {
+                // The replacing operation owns the UI now.
+            } catch {
+                guard !Task.isCancelled else { return }
+                search.isSearching = false
+                search.error = "Search could not finish. Results may be incomplete. \(error.localizedDescription)"
             }
-        } else {
-            // No text layer results — fall back to OCR
-            usingOCR = true
-            performOCRPdfSearch(query, doc: doc)
         }
     }
 
     private func clearPdfSearch() {
-        ocrSearchTask?.cancel()
-        ocrSearchTask = nil
-        searchSelections = []
-        ocrMatchPages = []
-        usingOCR = false
+        searchTask?.cancel()
+        searchTask = nil
+        searchResults = []
         search.currentIndex = 0
         search.isSearching = false
-    }
-
-    private func performOCRPdfSearch(_ query: String, doc: PDFDocument) {
-        let sourceData = data
-        let hash = fileHash ?? "doc"
-        let expectedPageCount = doc.pageCount
-        ocrSearchTask = Task.detached(priority: .utility) {
-            guard let backgroundDocument = PDFDocument(data: sourceData) else {
-                await MainActor.run { search.isSearching = false }
-                return
-            }
-            var matches: [Int] = []
-            for i in 0..<min(expectedPageCount, backgroundDocument.pageCount) {
-                if Task.isCancelled { return }
-                let tmpURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("manicule-pdf-ocr-\(hash)-\(i).png")
-                guard writePDFOCRThumbnail(
-                    document: backgroundDocument, pageIndex: i, to: tmpURL
-                ) else { continue }
-
-                let contains = await OCRService.shared.pageContains(imageURL: tmpURL, query: query)
-                try? FileManager.default.removeItem(at: tmpURL)
-                if Task.isCancelled { return }
-                if contains {
-                    matches.append(i)
-                }
-                let currentMatches = matches
-                await MainActor.run {
-                    if !Task.isCancelled { ocrMatchPages = currentMatches }
-                }
-            }
-            let finalMatches = matches
-            await MainActor.run {
-                if Task.isCancelled { return }
-                search.isSearching = false
-                if let first = finalMatches.first {
-                    currentPageIndex = first
-                }
-            }
-        }
+        search.error = nil
     }
 
     private func navigatePdfSearchResult(forward: Bool) {
@@ -665,10 +600,14 @@ struct PDFReaderView: View {
         } else {
             search.currentIndex = (search.currentIndex - 1 + count) % count
         }
-        if usingOCR {
-            currentPageIndex = ocrMatchPages[search.currentIndex]
-        } else {
-            navigateToSelection(searchSelections[search.currentIndex])
+        showPdfSearchResult()
+    }
+
+    private func showPdfSearchResult() {
+        guard searchResults.indices.contains(search.currentIndex) else { return }
+        switch searchResults[search.currentIndex] {
+        case .imagePage(let page): currentPageIndex = page
+        case .text(let selection): navigateToSelection(selection)
         }
     }
 
@@ -682,12 +621,8 @@ struct PDFReaderView: View {
 
     private func dismissPdfSearch() {
         searchDebouncer.cancel()
-        ocrSearchTask?.cancel()
-        ocrSearchTask = nil
+        clearPdfSearch()
         search.reset()
-        searchSelections = []
-        ocrMatchPages = []
-        usingOCR = false
     }
 
     private func toggleBookmark() {
@@ -697,52 +632,40 @@ struct PDFReaderView: View {
         )
     }
 
-    /// Skip page 0 so closing on the cover page doesn't pin the auto-restore
-    /// to "page 1" forever. The user is treated as "hasn't read yet" until
-    /// they advance past the first page. Comic reader uses the same rule.
     private func autoSavePosition() {
         guard let url = fileURL else { return }
-        guard currentPageIndex > 0 else { return }
+        guard pdfDocument != nil else { return }
         let position: ReadingPosition = .pdfPage(currentPageIndex)
-        bookmarkStore.savePosition(position, for: url, data: data, fileHash: fileHash)
+        bookmarkStore.savePosition(position, for: url, data: data, fileHash: fileHash, session: readingSession)
     }
 
 
     private func selectAutomatic() {
-        viewMode = .paginated
-        twoUpOverride = nil
+
         readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
-        viewMode = .paginated
-        twoUpOverride = false
+
         readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
     private func selectTwoPage() {
-        viewMode = .paginated
-        twoUpOverride = true
+
         currentPageIndex = PageNavigation.normalizedStart(
             current: currentPageIndex, pageCount: pageCount, twoUp: true)
         readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
     }
 
     private func selectScrolling() {
-        viewMode = .scrolling
+
         readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 
     private func toggleTrim() {
-        trimWhitespace.toggle()
-        if usesCropBoxTrimming {
-            if trimWhitespace {
-                applyTrimCropBoxes()
-            } else {
-                restoreOriginalCropBoxes()
-            }
-        }
-        readingPrefs.updatePreference(for: fileHash, apply: { $0.trimWhitespace = trimWhitespace }, applyGlobal: { readingPrefs.trimWhitespace = trimWhitespace })
+        let enabled = !trimWhitespace
+        readingPrefs.updatePreference(for: fileHash, apply: { $0.trimWhitespace = enabled },
+                                      applyGlobal: { readingPrefs.trimWhitespace = enabled })
     }
 
     /// Starts per-page whitespace trimming, processing the current page first
@@ -773,7 +696,7 @@ struct PDFReaderView: View {
     /// When `allPages` is true (scrolling mode), computes all crop boxes first,
     /// then applies them in a single batch to avoid layout thrashing.
     private func startTrimFrom(_ center: Int, allPages: Bool = false) {
-        guard let doc = pdfDocument else { return }
+        guard let doc = pdfDocument, let pageRenderer else { return }
         let count = doc.pageCount
         guard count > 0 else { return }
 
@@ -786,88 +709,32 @@ struct PDFReaderView: View {
             }
         }
 
-        // Build page order: center first, then expanding outward.
-        // Pages are marked in `trimmedPages` only after their crop box is
-        // applied — a pass cancelled mid-way must not leave pages permanently
-        // skipped. Re-running over an in-flight page is cheap: ContentTrimmer
-        // caches the detected rect by key.
-        var pageOrder: [Int] = []
-        var scheduled = Set<Int>()
-        for dist in 0..<count {
-            for candidate in [center + dist, center - dist] {
-                if candidate >= 0, candidate < count, !trimmedPages.contains(candidate),
-                   !scheduled.contains(candidate) {
-                    pageOrder.append(candidate)
-                    scheduled.insert(candidate)
-                }
-            }
-        }
+        let pageOrder = PageNavigation.nearestFirst(center: center, pageCount: count)
+            .filter { !trimmedPages.contains($0) }
         guard !pageOrder.isEmpty else { return }
-
-        let url = fileURL
-        let pdfData = data
 
         trimTask?.cancel()
         trimTask = Task {
-            let bgDoc: PDFDocument? = await Task.detached {
-                if let url { return PDFDocument(url: url) }
-                return PDFDocument(data: pdfData)
-            }.value
-            guard let bgDoc, !Task.isCancelled else { return }
-
-            if allPages {
-                // Scrolling mode: compute all crop boxes first, then batch-apply
-                var cropBoxes: [Int: CGRect] = [:]
-                for i in pageOrder {
-                    guard !Task.isCancelled else { return }
-                    if let box = await computeCropBox(bgDoc: bgDoc, pageIndex: i) {
-                        cropBoxes[i] = box
-                    }
-                }
+            var cropBoxes: [Int: CGRect] = [:]
+            for i in pageOrder {
                 guard !Task.isCancelled else { return }
+                let box = await pageRenderer.cropBox(at: i)
+                // Cancellation while awaiting detection must not reapply a crop
+                // after the user has restored the original page bounds.
+                guard !Task.isCancelled else { return }
+                cropBoxes[i] = box
+                if !allPages {
+                    if let box { doc.page(at: i)?.setBounds(box, for: .cropBox) }
+                    trimmedPages.insert(i)
+                }
+            }
+            if allPages {
                 for (i, box) in cropBoxes {
                     doc.page(at: i)?.setBounds(box, for: .cropBox)
                 }
                 trimmedPages.formUnion(pageOrder)
-            } else {
-                // Paginated mode: apply incrementally for fast first-page display
-                for i in pageOrder {
-                    guard !Task.isCancelled else { return }
-                    if let cropBox = await computeCropBox(bgDoc: bgDoc, pageIndex: i) {
-                        doc.page(at: i)?.setBounds(cropBox, for: .cropBox)
-                    }
-                    trimmedPages.insert(i)
-                }
             }
         }
-    }
-
-    /// Computes the trimmed crop box for a single page on a background thread.
-    private func computeCropBox(bgDoc: PDFDocument, pageIndex i: Int) async -> CGRect? {
-        let trimKey = "pdf-crop-\(fileHash ?? "doc")-\(i)"
-        return await Task.detached {
-            guard let page = bgDoc.page(at: i) else { return nil }
-            let mediaBox = page.bounds(for: .mediaBox)
-            let thumbScale: CGFloat = min(1000 / mediaBox.width, 1000 / mediaBox.height, 2.0)
-            let size = CGSize(width: mediaBox.width * thumbScale, height: mediaBox.height * thumbScale)
-            let thumbnail = page.thumbnail(of: size, for: .mediaBox)
-
-            #if canImport(UIKit)
-            guard let cgImage = thumbnail.cgImage else { return nil }
-            #else
-            guard let cgImage = thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-            #endif
-
-            let contentRect = ContentTrimmer.shared.contentRect(for: cgImage, key: trimKey)
-            guard contentRect != CGRect(x: 0, y: 0, width: 1, height: 1) else { return nil }
-
-            return CGRect(
-                x: mediaBox.origin.x + contentRect.minX * mediaBox.width,
-                y: mediaBox.origin.y + (1.0 - contentRect.maxY) * mediaBox.height,
-                width: contentRect.width * mediaBox.width,
-                height: contentRect.height * mediaBox.height
-            ) as CGRect?
-        }.value
     }
 
     /// Restores original crop boxes when trim is disabled.
@@ -887,6 +754,7 @@ struct PDFReaderView: View {
 
 private struct PDFThumbnailSidebar: View {
     let pdfDocument: PDFDocument?
+    let pageRenderer: PDFPageRenderer?
     @Binding var currentPageIndex: Int
     var bookmarkedPages: Set<Int> = []
 
@@ -896,9 +764,9 @@ private struct PDFThumbnailSidebar: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    if let doc = pdfDocument {
+                    if let doc = pdfDocument, let pageRenderer {
                         ForEach(0..<doc.pageCount, id: \.self) { index in
-                            PDFPageThumbnail(document: doc, pageIndex: index, isSelected: index == currentPageIndex, isBookmarked: bookmarkedPages.contains(index))
+                            PDFPageThumbnail(document: doc, renderer: pageRenderer, pageIndex: index, isSelected: index == currentPageIndex, isBookmarked: bookmarkedPages.contains(index))
                                 .id(index)
                                 .onTapGesture {
                                     currentPageIndex = index
@@ -935,6 +803,7 @@ private struct PDFThumbnailSidebar: View {
 
 private struct PDFPageThumbnail: View {
     let document: PDFDocument
+    let renderer: PDFPageRenderer
     let pageIndex: Int
     let isSelected: Bool
     var isBookmarked: Bool = false
@@ -983,21 +852,7 @@ private struct PDFPageThumbnail: View {
                 .foregroundStyle(isSelected ? .primary : .secondary)
         }
         .task(id: pageIndex) {
-            // Generate thumbnail off the main thread
-            let doc = document
-            let idx = pageIndex
-            let result: CGImage? = await Task.detached(priority: .utility) {
-                guard let page = doc.page(at: idx) else { return nil }
-                let bounds = page.bounds(for: .mediaBox)
-                let aspect = bounds.width / bounds.height
-                let size = CGSize(width: 160, height: 160 / aspect)
-                let platformImage = page.thumbnail(of: size, for: .mediaBox)
-                #if os(macOS)
-                return platformImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
-                #else
-                return platformImage.cgImage
-                #endif
-            }.value
+            let result = await renderer.thumbnail(at: pageIndex, width: 160)
             if !Task.isCancelled {
                 thumbnail = result
             }

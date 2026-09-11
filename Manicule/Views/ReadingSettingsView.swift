@@ -46,6 +46,7 @@ private struct PhoneOnlyDetents: ViewModifier {
 struct ReadingSettingsView: View {
     let fileHash: String?
     var showReflowOption: Bool = false
+    var onChooseAppIcon: ((AppIconChoice) -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     private let prefs = ReadingPreferences.shared
@@ -60,8 +61,9 @@ struct ReadingSettingsView: View {
     @State private var reflowText: Bool = false
     @State private var textAlign: TextAlignment = .natural
     @State private var usePerBookOverride: Bool = false
-    @State private var appIcon = AppIconChoice.current
-    @State private var appIconErrorMessage: String?
+    #if os(iOS)
+    private let appIcons = AppIconStore.shared
+    #endif
 
     var body: some View {
         NavigationStack {
@@ -147,16 +149,35 @@ struct ReadingSettingsView: View {
                 }
 
                 #if os(iOS)
-                if fileHash == nil {
+                if fileHash == nil, let onChooseAppIcon {
                     Section("App Icon") {
-                        Picker("Color", selection: $appIcon) {
-                            ForEach(AppIconChoice.allCases) { choice in
-                                Text(choice.displayName).tag(choice)
+                        // The presenting window dismisses Settings before starting
+                        // the system icon change, which presents its own modal UI.
+                        ForEach(AppIconChoice.allCases) { choice in
+                            Button {
+                                onChooseAppIcon(choice)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(choice.imageName)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 44, height: 44)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                        .accessibilityHidden(true)
+                                    Text(choice.displayName)
+                                        .foregroundStyle(.primary)
+                                    Spacer()
+                                    if appIcons.changingTo == choice {
+                                        ProgressView()
+                                    } else if appIcons.choice == choice {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(.tint)
+                                    }
+                                }
                             }
-                        }
-                        .disabled(!UIApplication.shared.supportsAlternateIcons)
-                        .onChange(of: appIcon) { _, choice in
-                            changeAppIcon(to: choice)
+                            .accessibilityLabel(choice.displayName)
+                            .accessibilityValue(appIcons.choice == choice ? "Selected" : "")
+                            .disabled(!appIcons.supportsAlternateIcons || appIcons.changingTo != nil)
                         }
                     }
                 }
@@ -191,6 +212,9 @@ struct ReadingSettingsView: View {
             }
             .task {
                 loadCurrentValues()
+                #if os(iOS)
+                appIcons.refresh()
+                #endif
             }
             .onChange(of: usePerBookOverride) { _, enabled in
                 if !enabled, let hash = fileHash {
@@ -209,34 +233,10 @@ struct ReadingSettingsView: View {
             .onChange(of: reflowText) { _, _ in applyLive() }
             .onChange(of: textAlign) { _, _ in applyLive() }
         }
-        .alert("Couldn't Change App Icon", isPresented: Binding(
-            get: { appIconErrorMessage != nil },
-            set: { if !$0 { appIconErrorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(appIconErrorMessage ?? "Unknown error")
-        }
         #if os(macOS)
         .frame(minHeight: 600)
         #endif
     }
-
-    #if os(iOS)
-    private func changeAppIcon(to choice: AppIconChoice) {
-        guard choice.alternateIconName != UIApplication.shared.alternateIconName else {
-            return
-        }
-        Task { @MainActor in
-            do {
-                try await UIApplication.shared.setAlternateIconName(choice.alternateIconName)
-            } catch {
-                appIcon = .current
-                appIconErrorMessage = error.localizedDescription
-            }
-        }
-    }
-    #endif
 
     @ViewBuilder
     private var previewText: some View {

@@ -60,6 +60,8 @@ enum ComicArchiveParser: Sendable {
             let result = try extractRAR(data: data)
             comicLog.info("parseRAR: RAR extraction succeeded, \(result.pageCount) pages")
             return result
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let rarError {
             comicLog.info("parseRAR: RAR failed: \(rarError.localizedDescription, privacy: .public), trying ZIP fallback")
             do {
@@ -92,6 +94,7 @@ enum ComicArchiveParser: Sendable {
         var totalUncompressedSize: UInt64 = 0
 
         for entry in entries {
+            try Task.checkCancellation()
             guard !entry.directory else { continue }
             let ext = (entry.fileName as NSString).pathExtension.lowercased()
             guard imageExtensions.contains(ext) else { continue }
@@ -113,7 +116,7 @@ enum ComicArchiveParser: Sendable {
             do {
                 try archive.extract(entry) { chunk, _ in
                     guard writeError == nil else { return }
-                    do { try handle.write(contentsOf: chunk) }
+                    do { try Task.checkCancellation(); try handle.write(contentsOf: chunk) }
                     catch { writeError = error }
                 }
                 try handle.close()

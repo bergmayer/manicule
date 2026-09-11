@@ -29,6 +29,8 @@ struct WebViewContent: Equatable {
     // when the layout flips on rotation, without a Swift round trip.
     var marginsOneUp: MarginSettings? = nil
     var marginsTwoUp: MarginSettings? = nil
+    var resourceLease: TemporaryDirectoryLease? = nil
+    var textAnchor: TextAnchor? = nil
 
     static func == (lhs: WebViewContent, rhs: WebViewContent) -> Bool {
         if lhs.isEPub != rhs.isEPub { return false }
@@ -95,6 +97,62 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     var documentResourceURL: URL?
     var bundleResourceURL: URL?
     var bookFileURL: URL?
+    var resourceLease: TemporaryDirectoryLease?
+    private var requests: [ObjectIdentifier: Task<Void, Never>] = [:]
+    private let reader = ResourceReader()
+
+    private actor ResourceReader {
+        func read(_ url: URL, roots: Roots) throws -> (Data, String) {
+            try Task.checkCancellation()
+            let file = try roots.resolve(url)
+            let data = try Data(contentsOf: file)
+            try Task.checkCancellation()
+            return (data, LocalFileSchemeHandler.mimeType(for: file.pathExtension))
+        }
+    }
+
+    /// Immutable routing snapshot, retained until this request finishes.
+    struct Roots: Sendable {
+        let base: URL
+        let document: URL?
+        let bundle: URL?
+        let book: URL?
+        let lease: TemporaryDirectoryLease?
+
+        nonisolated func resolve(_ request: URL) throws -> URL {
+            let path = String(request.path.dropFirst())
+            switch request.host {
+            case "book" where path == "book.epub", "bundle" where path == "book.epub":
+                guard path == "book.epub", let book else { throw URLError(.fileDoesNotExist) }
+                return book
+            case "bundle":
+                guard let bundle,
+                      let file = LocalFileSchemeHandler.resolvedFile(relativePath: path, under: bundle) else {
+                    throw URLError(.noPermissionsToReadFile)
+                }
+                if FileManager.default.fileExists(atPath: file.path) { return file }
+                // Xcode flattens bundled resources, including vendor imports.
+                guard let flattened = LocalFileSchemeHandler.resolvedFile(
+                    relativePath: (path as NSString).lastPathComponent, under: bundle) else {
+                    throw URLError(.noPermissionsToReadFile)
+                }
+                return flattened
+            case "local":
+                let file = URL(fileURLWithPath: request.path).standardizedFileURL
+                guard LocalFileSchemeHandler.isContained(file, under: base) else {
+                    throw URLError(.noPermissionsToReadFile)
+                }
+                return file
+            case "document":
+                guard let document,
+                      let file = LocalFileSchemeHandler.resolvedFile(relativePath: path, under: document) else {
+                    throw URLError(.noPermissionsToReadFile)
+                }
+                return file
+            default: throw URLError(.unsupportedURL)
+            }
+        }
+    }
 
     init(baseURL: URL) {
         self.baseURL = baseURL
@@ -102,120 +160,45 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
-        guard let requestURL = urlSchemeTask.request.url else {
+        guard let url = urlSchemeTask.request.url else {
             urlSchemeTask.didFailWithError(URLError(.badURL))
             return
         }
-
-        let host = requestURL.host ?? ""
-        webLog.debug("scheme: \(host, privacy: .public):\(requestURL.path, privacy: .public)")
-
-        switch host {
-        case "bundle":
-            serveBundleResource(requestURL: requestURL, task: urlSchemeTask)
-        case "book":
-            if requestURL.path == "/book.epub" {
-                serveBookFile(requestURL: requestURL, task: urlSchemeTask)
-            } else {
-                urlSchemeTask.didFailWithError(URLError(.unsupportedURL))
+        let id = ObjectIdentifier(urlSchemeTask)
+        let roots = Roots(base: baseURL, document: documentResourceURL,
+                          bundle: bundleResourceURL, book: bookFileURL, lease: resourceLease)
+        requests[id] = Task { [weak self, reader] in
+            do {
+                let (data, mimeType) = try await reader.read(url, roots: roots)
+                try Task.checkCancellation()
+                guard let self else { return }
+                let encoding = mimeType.hasPrefix("text/") || mimeType.contains("javascript")
+                    || mimeType.contains("json") || mimeType.contains("xml") ? "; charset=utf-8" : ""
+                // fetch() in foliate requires a successful HTTP-style status,
+                // even though these bytes come from a custom local scheme.
+                guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                    httpVersion: "HTTP/1.1", headerFields: [
+                        "Content-Type": mimeType + encoding, "Content-Length": String(data.count)
+                    ]) else { throw URLError(.badServerResponse) }
+                urlSchemeTask.didReceive(response)
+                guard requests[id] != nil else { return }
+                urlSchemeTask.didReceive(data)
+                guard requests.removeValue(forKey: id) != nil else { return }
+                urlSchemeTask.didFinish()
+            } catch {
+                guard !Task.isCancelled, self?.requests.removeValue(forKey: id) != nil else { return }
+                urlSchemeTask.didFailWithError(error)
             }
-        case "local":
-            serveLocalFile(requestURL: requestURL, task: urlSchemeTask)
-        case "document":
-            serveDocumentResource(requestURL: requestURL, task: urlSchemeTask)
-        default:
-            urlSchemeTask.didFailWithError(URLError(.unsupportedURL))
         }
     }
 
-    func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
-
-    // MARK: - Route handlers
-
-    private func serveBundleResource(requestURL: URL, task: any WKURLSchemeTask) {
-        let relativePath = String(requestURL.path.dropFirst())
-
-        // Serve book.epub from the bookFileURL (same origin to avoid CORS issues)
-        if relativePath == "book.epub" {
-            serveBookFile(requestURL: requestURL, task: task)
-            return
-        }
-
-        guard let bundleURL = bundleResourceURL else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-
-        guard var fileURL = Self.resolvedFile(relativePath: relativePath, under: bundleURL) else {
-            task.didFailWithError(URLError(.noPermissionsToReadFile))
-            return
-        }
-
-        // Xcode flattens resource directories. If the exact path doesn't exist,
-        // fall back to just the filename (handles foliate-js/vendor/* imports).
-        if !FileManager.default.fileExists(atPath: fileURL.path) {
-            let filename = (relativePath as NSString).lastPathComponent
-            guard let flattenedURL = Self.resolvedFile(relativePath: filename, under: bundleURL) else {
-                task.didFailWithError(URLError(.noPermissionsToReadFile))
-                return
-            }
-            fileURL = flattenedURL
-        }
-
-        guard let data = try? Data(contentsOf: fileURL) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-
-        let mimeType = Self.mimeType(for: fileURL.pathExtension)
-        respond(task: task, url: requestURL, data: data, mimeType: mimeType)
+    func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {
+        requests.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
     }
 
-    private func serveBookFile(requestURL: URL, task: any WKURLSchemeTask) {
-        guard let bookURL = bookFileURL,
-              let data = try? Data(contentsOf: bookURL) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-
-        respond(task: task, url: requestURL, data: data, mimeType: "application/epub+zip")
-    }
-
-    private func serveLocalFile(requestURL: URL, task: any WKURLSchemeTask) {
-        let filePath = requestURL.path
-        let fileURL = URL(fileURLWithPath: filePath).standardized
-
-        guard Self.isContained(fileURL, under: baseURL) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-
-        guard let data = try? Data(contentsOf: fileURL) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-
-        let mimeType = Self.mimeType(for: fileURL.pathExtension)
-        respond(task: task, url: requestURL, data: data, mimeType: mimeType)
-    }
-
-    private func serveDocumentResource(requestURL: URL, task: any WKURLSchemeTask) {
-        guard let root = documentResourceURL,
-              let fileURL = Self.resolvedFile(
-                relativePath: String(requestURL.path.dropFirst()),
-                under: root
-              ),
-              let data = try? Data(contentsOf: fileURL) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-
-        respond(
-            task: task,
-            url: requestURL,
-            data: data,
-            mimeType: Self.mimeType(for: fileURL.pathExtension)
-        )
+    func cancelAll() {
+        for request in requests.values { request.cancel() }
+        requests.removeAll()
     }
 
     /// Resolves a URL below `root`, rejecting dot components, absolute paths,
@@ -258,23 +241,7 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         return resolved.standardizedFileURL
     }
 
-    private func respond(task: any WKURLSchemeTask, url: URL, data: Data, mimeType: String) {
-        let encoding = mimeType.hasPrefix("text/") || mimeType.contains("javascript")
-            || mimeType.contains("json") || mimeType.contains("xml")
-            ? "; charset=utf-8" : ""
-        let response = HTTPURLResponse(
-            url: url,
-            statusCode: 200,
-            httpVersion: "HTTP/1.1",
-            headerFields: [
-                "Content-Type": "\(mimeType)\(encoding)",
-                "Content-Length": "\(data.count)",
-            ]
-        )!
-        task.didReceive(response)
-        task.didReceive(data)
-        task.didFinish()
-    }
+
 
     nonisolated static func mimeType(for ext: String) -> String {
         mimeTypes[ext.lowercased()] ?? "application/octet-stream"
@@ -312,6 +279,8 @@ final class WebViewProxy {
     var previousSection: (() -> Void)?            // ePub: go to previous chapter/section
     var goToPage: ((Int) -> Void)?              // text reader paginated: go to page index (animated)
     var goToPageImmediate: ((Int) -> Void)?     // text reader paginated: go to page index (no animation)
+    var restoreTextScroll: ((Double) -> Void)?
+    var goToTextAnchor: ((TextAnchor) -> Void)?
     var goToAnchor: ((String) -> Void)?         // text reader: scroll to anchor id
     var refocus: (() -> Void)?
 
@@ -333,12 +302,11 @@ final class WebViewProxy {
     var scrollToReadAloudOffset: ((Int) -> Void)?  // scroll/navigate to make character offset visible
 }
 
-#if os(macOS)
-
-struct WebViewRepresentable: NSViewRepresentable {
+struct WebViewRepresentable {
     let content: WebViewContent
     var proxy: WebViewProxy? = nil
     var onScrollPositionChange: ((Double) -> Void)?
+    var onTextAnchorChange: ((TextAnchor) -> Void)?
     var onPageInfo: ((_ currentPage: Int, _ totalPages: Int) -> Void)?
     var onBoundaryReached: ((_ direction: BoundaryDirection) -> Void)?
     // ePub bridge callbacks
@@ -348,9 +316,17 @@ struct WebViewRepresentable: NSViewRepresentable {
     var onSearchResult: ((_ results: [[String: String]], _ done: Bool) -> Void)?
     var onReadAloudSectionText: ((_ text: String, _ sectionIndex: Int, _ startOffset: Int) -> Void)?
     var onReadAloudSeek: ((_ offset: Int, _ sectionIndex: Int) -> Void)?
+    var onFailure: ((String) -> Void)?
+    var onSearchFailure: ((String) -> Void)?
 
+}
+
+#if os(macOS)
+
+extension WebViewRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let handler = LocalFileSchemeHandler(baseURL: content.baseURL)
+        handler.resourceLease = content.resourceLease
         handler.documentResourceURL = content.resourceBaseURL
         if content.isEPub {
             handler.bundleResourceURL = Bundle.main.resourceURL
@@ -383,73 +359,10 @@ struct WebViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        let coord = context.coordinator
-        coord.onScrollPositionChange = onScrollPositionChange
-        coord.onPageInfo = onPageInfo
-        coord.onBoundaryReached = onBoundaryReached
-        coord.onRelocate = onRelocate
-        coord.onBridgeReady = onBridgeReady
-        coord.onToggleChrome = onToggleChrome
-        coord.onSearchResult = onSearchResult
-        coord.onReadAloudSectionText = onReadAloudSectionText
-        coord.onReadAloudSeek = onReadAloudSeek
-
-        if content.isEPub {
-            coord.wireEPubProxy(proxy) { [weak nsView] in
-                DispatchQueue.main.async {
-                    guard let wv = nsView else { return }
-                    wv.window?.makeFirstResponder(wv)
-                }
-            }
-
-            // ePub: update scheme handler book URL
-            coord.schemeHandler?.bookFileURL = content.bookFileURL
-
-            // Reload the host page when the SwiftUI view is reused for a
-            // different book. The host URL itself is intentionally stable.
-            if coord.currentFileURL != content.schemeURL
-                || coord.currentBookFileURL != content.bookFileURL {
-                coord.currentFileURL = content.schemeURL
-                coord.currentBookFileURL = content.bookFileURL
-                nsView.load(URLRequest(url: content.schemeURL))
-            }
-        } else {
-            // Text reader mode: existing behavior
-            coord.pendingScrollFraction = content.scrollFraction
-            coord.pendingFragment = content.fragment
-            coord.pendingCSS = content.cssOverride
-            coord.startAtEnd = content.startAtEnd
-            let paginatedChanged = coord.paginated != content.paginated
-            coord.paginated = content.paginated
-            coord.schemeHandler?.baseURL = content.baseURL
-            coord.schemeHandler?.documentResourceURL = content.resourceBaseURL
-            coord.wireTextProxy(proxy) { [weak nsView] in
-                DispatchQueue.main.async {
-                    guard let wv = nsView else { return }
-                    wv.window?.makeFirstResponder(wv)
-                }
-            }
-
-            if coord.currentFileURL != content.schemeURL || paginatedChanged {
-                coord.currentFileURL = content.schemeURL
-                coord.currentMarginsOneUp = content.marginsOneUp
-                coord.currentMarginsTwoUp = content.marginsTwoUp
-                coord.currentTwoUp = content.twoUp
-                nsView.load(URLRequest(url: content.schemeURL))
-            } else if coord.currentCSS != content.cssOverride {
-                coord.injectCSS(into: nsView)
-            }
-
-            if coord.currentMarginsOneUp != content.marginsOneUp || coord.currentMarginsTwoUp != content.marginsTwoUp,
-               let one = content.marginsOneUp, let two = content.marginsTwoUp {
-                coord.currentMarginsOneUp = one
-                coord.currentMarginsTwoUp = two
-                coord.textReaderSetMarginsBoth(one: one, two: two)
-            }
-
-            if coord.currentTwoUp != content.twoUp {
-                coord.currentTwoUp = content.twoUp
-                coord.applyTwoUp(content.twoUp, to: nsView)
+        update(nsView, coordinator: context.coordinator) { [weak nsView] in
+            DispatchQueue.main.async {
+                guard let nsView else { return }
+                nsView.window?.makeFirstResponder(nsView)
             }
         }
     }
@@ -463,22 +376,10 @@ struct WebViewRepresentable: NSViewRepresentable {
 
 #else
 
-struct WebViewRepresentable: UIViewRepresentable {
-    let content: WebViewContent
-    var proxy: WebViewProxy? = nil
-    var onScrollPositionChange: ((Double) -> Void)?
-    var onPageInfo: ((_ currentPage: Int, _ totalPages: Int) -> Void)?
-    var onBoundaryReached: ((_ direction: BoundaryDirection) -> Void)?
-    // ePub bridge callbacks
-    var onRelocate: ((_ event: RelocateEvent) -> Void)?
-    var onBridgeReady: (() -> Void)?
-    var onToggleChrome: (() -> Void)?
-    var onSearchResult: ((_ results: [[String: String]], _ done: Bool) -> Void)?
-    var onReadAloudSectionText: ((_ text: String, _ sectionIndex: Int, _ startOffset: Int) -> Void)?
-    var onReadAloudSeek: ((_ offset: Int, _ sectionIndex: Int) -> Void)?
-
+extension WebViewRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let handler = LocalFileSchemeHandler(baseURL: content.baseURL)
+        handler.resourceLease = content.resourceLease
         handler.documentResourceURL = content.resourceBaseURL
         if content.isEPub {
             handler.bundleResourceURL = Bundle.main.resourceURL
@@ -563,89 +464,20 @@ struct WebViewRepresentable: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         let coord = context.coordinator
-        coord.onScrollPositionChange = onScrollPositionChange
-        coord.onPageInfo = onPageInfo
-        coord.onBoundaryReached = onBoundaryReached
-        coord.onRelocate = onRelocate
-        coord.onBridgeReady = onBridgeReady
-        coord.onToggleChrome = onToggleChrome
-        coord.onSearchResult = onSearchResult
-        coord.onReadAloudSectionText = onReadAloudSectionText
-        coord.onReadAloudSeek = onReadAloudSeek
-
-        if content.isEPub {
-            coord.wireEPubProxy(proxy) { [weak uiView] in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    uiView?.becomeFirstResponder()
-                }
+        if !content.isEPub {
+            uiView.scrollView.isPagingEnabled = false
+            uiView.scrollView.isScrollEnabled = !content.paginated
+        }
+        if let pan = coord.trackpadPanRecognizer {
+            if content.isEPub || content.paginated {
+                if pan.view == nil { uiView.addGestureRecognizer(pan) }
+            } else if pan.view != nil {
+                uiView.removeGestureRecognizer(pan)
             }
-
-            coord.schemeHandler?.bookFileURL = content.bookFileURL
-
-            // ePub: always keep trackpad recognizer (bridge handles mode)
-            if let pan = coord.trackpadPanRecognizer, pan.view == nil {
-                uiView.addGestureRecognizer(pan)
-            }
-
-            if coord.currentFileURL != content.schemeURL
-                || coord.currentBookFileURL != content.bookFileURL {
-                coord.currentFileURL = content.schemeURL
-                coord.currentBookFileURL = content.bookFileURL
-                uiView.load(URLRequest(url: content.schemeURL))
-            }
-        } else {
-            coord.pendingScrollFraction = content.scrollFraction
-            coord.pendingFragment = content.fragment
-            coord.pendingCSS = content.cssOverride
-            coord.startAtEnd = content.startAtEnd
-            let paginatedChanged = coord.paginated != content.paginated
-            coord.paginated = content.paginated
-            coord.schemeHandler?.baseURL = content.baseURL
-            coord.schemeHandler?.documentResourceURL = content.resourceBaseURL
-            coord.wireTextProxy(proxy) { [weak uiView] in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    uiView?.becomeFirstResponder()
-                }
-            }
-
-            // Update scroll behavior for mode changes
-            if content.paginated {
-                uiView.scrollView.isPagingEnabled = false
-                uiView.scrollView.isScrollEnabled = false
-            } else {
-                uiView.scrollView.isPagingEnabled = false
-                uiView.scrollView.isScrollEnabled = true
-            }
-
-            // Add/remove trackpad recognizer based on pagination mode
-            if let pan = coord.trackpadPanRecognizer {
-                if content.paginated && pan.view == nil {
-                    uiView.addGestureRecognizer(pan)
-                } else if !content.paginated && pan.view != nil {
-                    uiView.removeGestureRecognizer(pan)
-                }
-            }
-
-            if coord.currentFileURL != content.schemeURL || paginatedChanged {
-                coord.currentFileURL = content.schemeURL
-                coord.currentMarginsOneUp = content.marginsOneUp
-                coord.currentMarginsTwoUp = content.marginsTwoUp
-                coord.currentTwoUp = content.twoUp
-                uiView.load(URLRequest(url: content.schemeURL))
-            } else if coord.currentCSS != content.cssOverride {
-                coord.injectCSS(into: uiView)
-            }
-
-            if coord.currentMarginsOneUp != content.marginsOneUp || coord.currentMarginsTwoUp != content.marginsTwoUp,
-               let one = content.marginsOneUp, let two = content.marginsTwoUp {
-                coord.currentMarginsOneUp = one
-                coord.currentMarginsTwoUp = two
-                coord.textReaderSetMarginsBoth(one: one, two: two)
-            }
-
-            if coord.currentTwoUp != content.twoUp {
-                coord.currentTwoUp = content.twoUp
-                coord.applyTwoUp(content.twoUp, to: uiView)
+        }
+        update(uiView, coordinator: coord) { [weak uiView] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                uiView?.becomeFirstResponder()
             }
         }
     }
@@ -658,6 +490,75 @@ struct WebViewRepresentable: UIViewRepresentable {
 }
 
 #endif
+
+extension WebViewRepresentable {
+    func update(_ nsView: WKWebView, coordinator coord: WebViewCoordinator, refocus: @escaping () -> Void) {
+        coord.schemeHandler?.resourceLease = content.resourceLease
+        coord.onScrollPositionChange = onScrollPositionChange
+        coord.onTextAnchorChange = onTextAnchorChange
+        coord.onPageInfo = onPageInfo
+        coord.onBoundaryReached = onBoundaryReached
+        coord.onRelocate = onRelocate
+        coord.onBridgeReady = onBridgeReady
+        coord.onToggleChrome = onToggleChrome
+        coord.onSearchResult = onSearchResult
+        coord.onReadAloudSectionText = onReadAloudSectionText
+        coord.onReadAloudSeek = onReadAloudSeek
+        coord.onFailure = onFailure
+        coord.onSearchFailure = onSearchFailure
+
+        if content.isEPub {
+            coord.wireEPubProxy(proxy, refocus: refocus)
+
+            // ePub: update scheme handler book URL
+            coord.schemeHandler?.bookFileURL = content.bookFileURL
+
+            // Reload the host page when the SwiftUI view is reused for a
+            // different book. The host URL itself is intentionally stable.
+            if coord.currentFileURL != content.schemeURL
+                || coord.currentBookFileURL != content.bookFileURL {
+                coord.currentFileURL = content.schemeURL
+                coord.currentBookFileURL = content.bookFileURL
+                coord.load(content.schemeURL, in: nsView)
+            }
+        } else {
+            // Text reader mode: existing behavior
+            coord.pendingScrollFraction = content.scrollFraction
+            coord.pendingTextAnchor = content.textAnchor
+            coord.pendingFragment = content.fragment
+            coord.pendingCSS = content.cssOverride
+            coord.startAtEnd = content.startAtEnd
+            let paginatedChanged = coord.paginated != content.paginated
+            coord.paginated = content.paginated
+            coord.schemeHandler?.baseURL = content.baseURL
+            coord.schemeHandler?.documentResourceURL = content.resourceBaseURL
+            coord.wireTextProxy(proxy, refocus: refocus)
+
+            if coord.currentFileURL != content.schemeURL || paginatedChanged {
+                coord.currentFileURL = content.schemeURL
+                coord.currentMarginsOneUp = content.marginsOneUp
+                coord.currentMarginsTwoUp = content.marginsTwoUp
+                coord.currentTwoUp = content.twoUp
+                coord.load(content.schemeURL, in: nsView)
+            } else if coord.currentCSS != content.cssOverride {
+                coord.injectCSS(into: nsView)
+            }
+
+            if coord.currentMarginsOneUp != content.marginsOneUp || coord.currentMarginsTwoUp != content.marginsTwoUp,
+               let one = content.marginsOneUp, let two = content.marginsTwoUp {
+                coord.currentMarginsOneUp = one
+                coord.currentMarginsTwoUp = two
+                coord.textReaderSetMarginsBoth(one: one, two: two)
+            }
+
+            if coord.currentTwoUp != content.twoUp {
+                coord.currentTwoUp = content.twoUp
+                coord.applyTwoUp(content.twoUp, to: nsView)
+            }
+        }
+    }
+
+}
 
 enum BoundaryDirection {
     case previous
@@ -721,23 +622,54 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         proxy?.previousPage = { [weak self] in self?.previousPage() }
         proxy?.goToPage = { [weak self] page in self?.textReaderGoToPage(page) }
         proxy?.goToPageImmediate = { [weak self] page in self?.textReaderGoToPage(page, animate: false) }
+        proxy?.restoreTextScroll = { [weak self] fraction in
+            guard fraction.isFinite else { return }
+            self?.webView?.evaluateJavaScript("window.manicule?.restoreScroll(\(min(1, max(0, fraction)))); window.manicule?.reportScroll();")
+        }
+        proxy?.goToTextAnchor = { [weak self] anchor in self?.textReaderGoToTextAnchor(anchor) }
         proxy?.goToAnchor = { [weak self] id in self?.textReaderGoToAnchor(id) }
         proxy?.refocus = refocus
     }
 
     /// Remove script message handlers and stop the web view.
     /// Safe to call multiple times; only the first call has effect.
+    private var searchRequestID: String?
+    private var narrationRequestID: String?
+    private var activeNavigation: WKNavigation?
+    private var loadTimeout: Task<Void, Never>?
+    private var didReportFailure = false
+
+    func load(_ url: URL, in webView: WKWebView) {
+        loadTimeout?.cancel()
+        didReportFailure = false
+        activeNavigation = webView.load(URLRequest(url: url))
+        loadTimeout = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(45)) } catch { return }
+            self?.reportFailure("The document renderer did not finish loading. Retry to reload it.")
+        }
+    }
+
+    private func reportFailure(_ message: String) {
+        loadTimeout?.cancel()
+        guard !didReportFailure else { return }
+        didReportFailure = true
+        webLog.error("Renderer failed: \(message, privacy: .public)")
+        onFailure?(message)
+    }
+
     func tearDown() {
+        loadTimeout?.cancel()
         guard !tornDown else { return }
         tornDown = true
         guard let wv = webView else { return }
         wv.stopLoading()
+        schemeHandler?.cancelAll()
         wv.navigationDelegate = nil
         let cc = wv.configuration.userContentController
         cc.removeScriptMessageHandler(forName: "pageHandler")
         cc.removeScriptMessageHandler(forName: "bridge")
         cc.removeAllUserScripts()
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         if let pan = trackpadPanRecognizer, let v = pan.view {
             v.removeGestureRecognizer(pan)
         }
@@ -747,6 +679,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
     // Text reader callbacks
     var onScrollPositionChange: ((Double) -> Void)?
+    var onTextAnchorChange: ((TextAnchor) -> Void)?
     var onPageInfo: ((_ currentPage: Int, _ totalPages: Int) -> Void)?
     var onBoundaryReached: ((_ direction: BoundaryDirection) -> Void)?
 
@@ -757,9 +690,12 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     var onSearchResult: ((_ results: [[String: String]], _ done: Bool) -> Void)?
     var onReadAloudSectionText: ((_ text: String, _ sectionIndex: Int, _ startOffset: Int) -> Void)?
     var onReadAloudSeek: ((_ offset: Int, _ sectionIndex: Int) -> Void)?
+    var onFailure: ((String) -> Void)?
+    var onSearchFailure: ((String) -> Void)?
 
     // Text reader state
     var pendingScrollFraction: Double?
+    var pendingTextAnchor: TextAnchor?
     var pendingFragment: String?
     var pendingCSS: String?
     var currentCSS: String?
@@ -769,7 +705,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     var currentMarginsOneUp: MarginSettings? = nil
     var currentMarginsTwoUp: MarginSettings? = nil
 
-    #if os(iOS)
+    #if os(iOS) || os(visionOS)
     var trackpadPanRecognizer: UIPanGestureRecognizer?
     var fingerPanRecognizer: UIPanGestureRecognizer?
     var epubFlowMode: String = "paginated"
@@ -930,23 +866,80 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
             // Binary search within the text node to find the exact
             // character offset where visibility starts.
-            var lo = 0, hi = firstNode.length;
-            while (hi - lo > 1) {
+            var lo = 0, hi = firstNode.length - 1;
+            while (lo < hi) {
                 var mid = Math.floor((lo + hi) / 2);
                 var r = document.createRange();
                 r.setStart(firstNode, mid);
-                r.setEnd(firstNode, mid);
+                r.setEnd(firstNode, mid + 1);
                 var rects = r.getClientRects();
-                if (rects.length === 0) { lo = mid; continue; }
-                var absX = rects[0].left + sl;
-                if (absX < visStart) lo = mid;
-                else hi = mid;
+                if (rects.length && rects[0].left + sl >= visStart) hi = mid;
+                else lo = mid + 1;
             }
 
             var range = document.createRange();
             range.setStart(firstNode, lo);
             range.collapse(true);
             return range;
+        }
+
+        // Source markers survive raw/Markdown rendering; the passage and
+        // UTF-16 offset identify a point inside a long or repeated block.
+        function captureTextAnchor() {
+            var range = currentMode === 'paginated' ? getVisibleRange()
+                : document.caretRangeFromPoint(24, 24);
+            if (!range || range.startContainer.nodeType !== 3) return null;
+            var node = range.startContainer;
+            var block = node.parentElement.closest('[data-source-line]');
+            if (!block) return null;
+            var prefix = document.createRange();
+            prefix.selectNodeContents(block);
+            prefix.setEnd(node, range.startOffset);
+            var offset = prefix.toString().length;
+            return {line: Number(block.dataset.sourceLine), offset: offset,
+                quote: Array.from(block.textContent.slice(offset)).slice(0, 80).join('')};
+        }
+
+        function restoreTextAnchor(anchor) {
+            var blocks = Array.from(document.querySelectorAll('[data-source-line]'));
+            if (!blocks.length) return false;
+            var best = null, bestScore = Infinity;
+            blocks.forEach(function(block, i) {
+                var line = Number(block.dataset.sourceLine);
+                var end = i + 1 < blocks.length ? Number(blocks[i + 1].dataset.sourceLine) : Infinity;
+                var distance = anchor.line >= line && anchor.line < end ? 0 : Math.abs(line - anchor.line);
+                var text = block.textContent;
+                var offset = Math.min(anchor.offset, text.length);
+                var match = anchor.quote ? text.indexOf(anchor.quote) : -1;
+                if (match >= 0) {
+                    offset = match;
+                    for (var next = text.indexOf(anchor.quote, match + 1); next >= 0;
+                         next = text.indexOf(anchor.quote, next + 1)) {
+                        if (Math.abs(next - anchor.offset) < Math.abs(offset - anchor.offset)) offset = next;
+                    }
+                }
+                var score = (anchor.quote && match < 0 ? 1e15 : 0) + distance * 1e9 + Math.abs(offset - anchor.offset);
+                if (score < bestScore) { bestScore = score; best = {block: block, offset: offset}; }
+            });
+            var walker = document.createTreeWalker(best.block, NodeFilter.SHOW_TEXT);
+            var node, offset = best.offset, target = null;
+            while ((node = walker.nextNode())) {
+                if (offset <= node.length) { target = node; break; }
+                offset -= node.length;
+            }
+            if (!target) return false;
+            var range = document.createRange();
+            range.setStart(target, offset);
+            range.setEnd(target, Math.min(target.length, offset + 1));
+            if (currentMode === 'paginated') {
+                var page = findPageForAnchor(range);
+                if (page < 0) return false;
+                goToPage(page, false);
+            } else {
+                window.scrollTo(0, window.scrollY + range.getBoundingClientRect().top - 16);
+                reportScroll();
+            }
+            return true;
         }
 
         function getCenterRange() {
@@ -1087,7 +1080,8 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             var tp = totalPages();
             window.webkit.messageHandlers.pageHandler.postMessage({
                 currentPage: currentPageIdx,
-                totalPages: tp
+                totalPages: tp,
+                textAnchor: captureTextAnchor()
             });
             updateAnchor();
         }
@@ -1290,7 +1284,8 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         function waitForStableLayout(callback) {
             var lastWidth = -1, stableCount = 0;
             function check() {
-                var sw = scroller.scrollWidth;
+                var sw = (currentMode === 'paginated' ? scroller.scrollWidth : document.body.scrollHeight)
+                    + ':' + window.innerWidth + ':' + window.innerHeight;
                 if (sw === lastWidth) stableCount++;
                 else { stableCount = 0; lastWidth = sw; }
                 if (stableCount >= 5) callback();
@@ -1646,7 +1641,8 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
         function reportScroll() {
             window.webkit.messageHandlers.pageHandler.postMessage({
-                scrollFraction: scrollFraction()
+                scrollFraction: scrollFraction(),
+                textAnchor: captureTextAnchor()
             });
         }
 
@@ -1762,7 +1758,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             waitForStableLayout(function() {
                 appendVirtualColumnIfNeeded();
                 snapToPageBoundaries();
-                if (options.startAtEnd) {
+                if (options.textAnchor && restoreTextAnchor(options.textAnchor)) {
+                    // Restored the same passage in this layout.
+                } else if (options.startAtEnd) {
                     goToEnd(false);
                 } else if (options.fragment) {
                     var el = document.getElementById(options.fragment);
@@ -1784,7 +1782,8 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 } else {
                     reportPage();
                 }
-                document.documentElement.style.visibility = 'visible';
+                document.documentElement.style.setProperty('visibility', 'visible', 'important');
+                window.webkit.messageHandlers.pageHandler.postMessage({type: 'ready'});
             });
         }
 
@@ -1792,14 +1791,17 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             currentMode = 'scroll';
             window.addEventListener('scroll', handleScroll, {passive: true});
 
-            requestAnimationFrame(function() {
-                if (options.startFraction !== undefined && options.startFraction > 0) {
+            waitForStableLayout(function() {
+                if (options.textAnchor && restoreTextAnchor(options.textAnchor)) {
+                    // Source anchors take precedence over legacy percentages.
+                } else if (options.startFraction !== undefined && options.startFraction > 0) {
                     restoreScroll(options.startFraction);
                 } else if (options.fragment) {
                     var el = document.getElementById(options.fragment);
                     if (el) el.scrollIntoView();
                 }
-                document.documentElement.style.visibility = 'visible';
+                document.documentElement.style.setProperty('visibility', 'visible', 'important');
+                window.webkit.messageHandlers.pageHandler.postMessage({type: 'ready'});
                 reportScroll();
             });
         }
@@ -1904,6 +1906,8 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             panStart: function() { panStart(); },
             panMove: function(dx) { panMove(dx); },
             panEnd: function(velocityX) { panEnd(velocityX); },
+            captureTextAnchor: captureTextAnchor,
+            restoreTextAnchor: restoreTextAnchor,
             goToAnchor: function(id) {
                 var el = document.getElementById(id);
                 if (!el) return;
@@ -2036,13 +2040,16 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     func bridgeSearch(_ query: String) {
+        let requestID = UUID().uuidString
+        searchRequestID = requestID
         let escaped = query.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "'", with: "\\'")
             .replacingOccurrences(of: "\n", with: "\\n")
-        webView?.evaluateJavaScript("window.bridge?.search('\(escaped)');")
+        webView?.evaluateJavaScript("window.bridge?.search('\(escaped)', '\(requestID)');")
     }
 
     func bridgeClearSearch() {
+        searchRequestID = nil
         webView?.evaluateJavaScript("window.bridge?.clearSearch();")
     }
 
@@ -2061,7 +2068,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     func bridgeStartReadAloud() {
-        webView?.evaluateJavaScript("window.bridge?.startReadAloud();")
+        let requestID = UUID().uuidString
+        narrationRequestID = requestID
+        webView?.evaluateJavaScript("window.bridge?.startReadAloud('\(requestID)');")
     }
 
     func bridgeHighlightReadAloud(start: Int, length: Int) {
@@ -2073,6 +2082,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     func bridgeStopReadAloud() {
+        narrationRequestID = nil
         webView?.evaluateJavaScript("window.bridge?.stopReadAloud();")
     }
 
@@ -2095,6 +2105,12 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
     func textReaderGoToPage(_ page: Int, animate: Bool = true) {
         webView?.evaluateJavaScript("window.manicule?.goToPage(\(page), \(animate));")
+    }
+
+    func textReaderGoToTextAnchor(_ anchor: TextAnchor) {
+        guard let data = try? JSONEncoder().encode(anchor),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.manicule?.restoreTextAnchor(\(json));")
     }
 
     func textReaderGoToAnchor(_ id: String) {
@@ -2204,19 +2220,23 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         #endif
     }
 
-    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {}
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+        MainActor.assumeIsolated { navigationFailed(navigation, error: error) }
+    }
 
-    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {}
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+        MainActor.assumeIsolated { navigationFailed(navigation, error: error) }
+    }
+
+    private func navigationFailed(_ navigation: WKNavigation?, error: Error) {
+        guard navigation === activeNavigation,
+              (error as NSError).code != NSURLErrorCancelled else { return }
+        reportFailure(error.localizedDescription)
+    }
 
     nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        // The WebContent process crashed (memory pressure, sandbox violation, etc.).
-        // Reload the current page to recover rather than leaving a blank view.
-        _ = MainActor.assumeIsolated {
-            if let url = currentFileURL {
-                webView.load(URLRequest(url: url))
-            } else {
-                webView.reload()
-            }
+        MainActor.assumeIsolated {
+            reportFailure("The document renderer stopped unexpectedly. Retry to reload it at your saved position.")
         }
     }
 
@@ -2232,7 +2252,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 #endif
             } else {
                 // Text reader mode: inject the readerScript
-                webView.evaluateJavaScript(readerScript)
+                webView.evaluateJavaScript(readerScript) { _, error in
+                    if let error { self.reportFailure(error.localizedDescription) }
+                }
                 injectCSS(into: webView)
 
                 let mode = paginated ? "paginated" : "scroll"
@@ -2243,6 +2265,12 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 }
                 if let twoUp = currentTwoUp {
                     options["twoUp"] = twoUp
+                }
+                if let anchor = pendingTextAnchor,
+                   let data = try? JSONEncoder().encode(anchor),
+                   let value = try? JSONSerialization.jsonObject(with: data) {
+                    options["textAnchor"] = value
+                    pendingTextAnchor = nil
                 }
                 if startAtEnd {
                     options["startAtEnd"] = true
@@ -2296,6 +2324,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             webLog.info("Bridge ready")
             onBridgeReady?()
         case "relocate":
+            loadTimeout?.cancel()
             let event = RelocateEvent(from: body)
             onRelocate?(event)
             // Also forward fraction as scroll position for generic tracking
@@ -2314,7 +2343,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 openExternally(url)
             }
         case "flowChanged":
-            #if os(iOS)
+            #if os(iOS) || os(visionOS)
             if let flow = body["flow"] as? String {
                 epubFlowMode = flow
             }
@@ -2322,6 +2351,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         case "toggleChrome":
             onToggleChrome?()
         case "searchResult":
+            guard let searchRequestID, body["requestID"] as? String == searchRequestID else { return }
             let results = body["results"] as? [[String: Any]] ?? []
             let done = body["done"] as? Bool ?? true
             let mapped = results.map { item -> [String: String] in
@@ -2333,24 +2363,35 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             }
             onSearchResult?(mapped, done)
         case "readAloudSectionText":
+            guard let narrationRequestID, body["requestID"] as? String == narrationRequestID else { return }
             let text = body["text"] as? String ?? ""
             let sectionIndex = body["sectionIndex"] as? Int ?? -1
             let startOffset = body["startOffset"] as? Int ?? 0
             onReadAloudSectionText?(text, sectionIndex, startOffset)
         case "readAloudSeek":
+            guard let narrationRequestID, body["requestID"] as? String == narrationRequestID else { return }
             let offset = body["offset"] as? Int ?? 0
             let sectionIndex = body["sectionIndex"] as? Int ?? -1
             onReadAloudSeek?(offset, sectionIndex)
+        case "searchError":
+            guard let searchRequestID, body["requestID"] as? String == searchRequestID else { return }
+            onSearchFailure?(body["message"] as? String ?? "Search could not finish.")
         case "error":
-            if let msg = body["message"] as? String {
-                webLog.error("Bridge error: \(msg, privacy: .public)")
-            }
+            reportFailure(body["message"] as? String ?? "The publication could not be rendered.")
+        case "diagnostic":
+            webLog.info("Bridge: \(String(describing: body["message"]), privacy: .public)")
         default:
             break
         }
     }
 
     private func handlePageHandlerMessage(_ body: [String: Any]) {
+        if let value = body["textAnchor"] as? [String: Any],
+           let line = value["line"] as? Int, let offset = value["offset"] as? Int,
+           let quote = value["quote"] as? String {
+            onTextAnchorChange?(TextAnchor(line: line, offset: offset, quote: quote))
+        }
+        if body["type"] as? String == "ready" { loadTimeout?.cancel() }
         if let type = body["type"] as? String, type == "toggleChrome" {
             onToggleChrome?()
         } else if let boundary = body["boundary"] as? String {
@@ -2367,6 +2408,6 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 }
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
 extension WebViewCoordinator: UIGestureRecognizerDelegate {}
 #endif

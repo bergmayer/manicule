@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 import os
 
 /// Persists reading positions for documents, synced via iCloud key-value store.
@@ -24,6 +24,9 @@ final class BookmarkStore {
     static let maxRecentBooks = 12
     static let maxPinnedBooks = 60
     private let cloud = NSUbiquitousKeyValueStore.default
+    private let bookmarkStorage: SyncedCollectionStorage<BookmarkEntry>
+    private let positionStorage: SyncedCollectionStorage<AutoSavedPosition>
+    private var cloudObserver: NSObjectProtocol?
     /// Device-local security-scoped URL bookmarks keyed by fileHash.
     /// These allow reopening files from the Recents list without re-picking.
     private var urlBookmarks: [String: Data] = [:]
@@ -42,15 +45,23 @@ final class BookmarkStore {
     private static let bookmarkMigrationKey = "manicule.urlBookmarksMigrated_v2"
 
     private init() {
-        self.entries = Self.loadFromCloud()
-        self.autoSavedPositions = Self.loadAutoSaved()
-        self.urlBookmarks = Self.loadURLBookmarks()
-        self.fileProviderRefs = Self.loadFileProviderRefs()
+        bookmarkStorage = SyncedCollectionStorage(key: Self.iCloudKey,
+            readCloud: { NSUbiquitousKeyValueStore.default.data(forKey: Self.iCloudKey) },
+            writeCloud: { try ReadingCloud.write($0, key: Self.iCloudKey) }, legacyDate: { $0.lastOpened })
+        positionStorage = SyncedCollectionStorage(key: Self.autoSaveKey,
+            readCloud: { NSUbiquitousKeyValueStore.default.data(forKey: Self.autoSaveKey) },
+            writeCloud: { try ReadingCloud.write($0, key: Self.autoSaveKey) }, legacyDate: { $0.lastOpened })
+        self.entries = bookmarkStorage.values
+        self.autoSavedPositions = positionStorage.values
+        self.lastError = bookmarkStorage.error ?? positionStorage.error
+        self.urlBookmarks = loadURLBookmarks()
+        self.fileProviderRefs = loadFileProviderRefs()
 
         // One-time migration: clear bookmarks saved with .minimalBookmark (broken security scope)
         if !UserDefaults.standard.bool(forKey: Self.bookmarkMigrationKey) {
             if !urlBookmarks.isEmpty {
                 Self.logger.info("Migration: clearing \(self.urlBookmarks.count) old URL bookmarks (may have been .minimalBookmark)")
+                UserDefaults.standard.set(urlBookmarks, forKey: Self.urlBookmarksKey + ".legacyBackup")
                 urlBookmarks.removeAll()
                 persistURLBookmarks()
             }
@@ -59,14 +70,22 @@ final class BookmarkStore {
 
         Self.logger.info("BookmarkStore init: \(self.autoSavedPositions.count) tracked books, \(self.urlBookmarks.count) URL bookmarks")
 
-        NotificationCenter.default.addObserver(
+        cloudObserver = NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: cloud,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             MainActor.assumeIsolated {
-                self?.entries = Self.loadFromCloud()
-                self?.autoSavedPositions = Self.loadAutoSaved()
+                guard let self else { return }
+                if notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int == NSUbiquitousKeyValueStoreQuotaViolationChange {
+                    self.lastError = ReadingCloud.quotaMessage
+                    return
+                }
+                self.bookmarkStorage.synchronize()
+                self.positionStorage.synchronize()
+                self.entries = self.bookmarkStorage.values
+                self.autoSavedPositions = self.positionStorage.values
+                self.lastError = self.bookmarkStorage.error ?? self.positionStorage.error
             }
         }
         cloud.synchronize()
@@ -193,58 +212,67 @@ final class BookmarkStore {
         autoSavedPositions.removeAll()
         persistAutoSaved()
         for hash in hashes {
-            CoverThumbnailCache.shared.removeCover(for: hash)
+            removeDeviceLocalState(for: hash)
         }
         sessionRefreshedPaths.removeAll()
     }
 
     // MARK: - Auto-Save Positions
 
-    /// Save or update the reading position for a book. Manages the recent stack and pinned limits.
-    /// Returns an error message if the pinned limit is exceeded; nil on success.
+    /// Called once when a document is deliberately opened. Only opening can
+    /// create membership; page turns and closing an older window cannot.
+    func beginReading(_ document: ReaderDocument, at url: URL) -> ReadingSession? {
+        let hash = document.fileHash
+        if positionStorage.membership(for: hash) == nil {
+            let pinned = hasBookmarks(for: hash) || ReadingPreferences.shared.hasOverride(for: hash)
+            if pinned && pinnedBooks.count >= Self.maxPinnedBooks {
+                lastError = "You have \(Self.maxPinnedBooks) books with custom settings or bookmarks. Remove one before adding another."
+                return nil
+            }
+            let initial: ReadingPosition
+            switch document.content {
+            case .pdf: initial = .pdfPage(0)
+            case .epub: initial = .epubSpine(index: 0, scrollFraction: 0)
+            case .comic: initial = .comicPage(0)
+            case .plainText, .markdown: initial = .textOffset(0)
+            }
+            autoSavedPositions.append(AutoSavedPosition(
+                id: hash, fileName: url.lastPathComponent, position: initial,
+                lastOpened: Date(), pinned: pinned,
+                relativePathHint: Self.extractRelativePathHint(from: url), filePathString: url.path))
+            evictOldRecentBooks()
+            persistAutoSaved()
+        }
+        return positionStorage.membership(for: hash).map { ReadingSession(fileHash: hash, membership: $0) }
+    }
+
+    /// Updates an existing membership. An old window cannot re-add a removed
+    /// book, even after another window explicitly opens it again.
     @discardableResult
     func savePosition(
         _ position: ReadingPosition,
         for fileURL: URL,
         data: Data,
         tocLabel: String? = nil,
-        fileHash: String? = nil
+        fileHash: String? = nil,
+        session: ReadingSession?
     ) -> String? {
         let hash = fileHash ?? FileHasher.hash(data: data)
-        let fileName = fileURL.lastPathComponent
-        let isPinned = hasBookmarks(for: hash) || ReadingPreferences.shared.hasOverride(for: hash)
-
-        let pathHint = Self.extractRelativePathHint(from: fileURL)
-
-        if let idx = autoSavedPositions.firstIndex(where: { $0.id == hash }) {
-            // Update existing entry
-            autoSavedPositions[idx].position = position
-            autoSavedPositions[idx].lastOpened = Date()
-            autoSavedPositions[idx].tocLabel = tocLabel
-            autoSavedPositions[idx].pinned = isPinned
-            if let pathHint { autoSavedPositions[idx].relativePathHint = pathHint }
-            autoSavedPositions[idx].filePathString = fileURL.path
-        } else {
-            // New entry — check limits
-            if isPinned {
-                let pinnedCount = autoSavedPositions.filter(\.pinned).count
-                if pinnedCount >= Self.maxPinnedBooks {
-                    let message = "You have \(Self.maxPinnedBooks) books with custom settings or bookmarks. Please remove some before opening new books."
-                    lastError = message
-                    return message
-                }
-            }
-            let entry = AutoSavedPosition(
-                id: hash, fileName: fileName, position: position,
-                lastOpened: Date(), tocLabel: tocLabel, pinned: isPinned,
-                relativePathHint: pathHint, filePathString: fileURL.path
-            )
-            autoSavedPositions.append(entry)
+        guard let session, session.fileHash == hash,
+              let idx = autoSavedPositions.firstIndex(where: { $0.id == hash }) else { return nil }
+        autoSavedPositions[idx].position = position
+        autoSavedPositions[idx].lastOpened = Date()
+        autoSavedPositions[idx].tocLabel = tocLabel
+        autoSavedPositions[idx].pinned = hasBookmarks(for: hash) || ReadingPreferences.shared.hasOverride(for: hash)
+        if let pathHint = Self.extractRelativePathHint(from: fileURL) {
+            autoSavedPositions[idx].relativePathHint = pathHint
         }
+        autoSavedPositions[idx].filePathString = fileURL.path
 
-        evictOldRecentBooks()
-        lastError = nil
-        persistAutoSaved()
+        let saved = positionStorage.update(autoSavedPositions[idx], membership: session.membership)
+        autoSavedPositions = positionStorage.values
+        if let error = positionStorage.error { lastError = error }
+        guard saved else { return nil }
 
         if sessionRefreshedPaths[hash] != fileURL.path {
             sessionRefreshedPaths[hash] = fileURL.path
@@ -252,20 +280,10 @@ final class BookmarkStore {
             // Store a security-scoped URL bookmark so the file can be reopened from Recents
             saveURLBookmark(for: fileURL, fileHash: hash)
 
-            // Generate cover thumbnail if not yet cached (runs in background)
-            let url = fileURL
-            let fileData = data
-            let cache = CoverThumbnailCache.shared
-            Task.detached(priority: .utility) {
-                cache.generateFromFileSync(at: url, data: fileData, fileHash: hash)
-            }
+            CoverThumbnailCache.shared.generateFromFile(at: fileURL, data: data, fileHash: hash)
         }
 
         return nil
-    }
-
-    func clearLastError() {
-        lastError = nil
     }
 
     /// Get the auto-saved position for a book.
@@ -334,21 +352,9 @@ final class BookmarkStore {
     }
 
     private func persistAutoSaved() {
-        do {
-            let data = try JSONEncoder().encode(autoSavedPositions)
-            cloud.set(data, forKey: Self.autoSaveKey)
-            cloud.synchronize()
-        } catch {
-            Self.logger.error("Failed to encode auto-saved positions: \(error)")
-        }
-    }
-
-    private static func loadAutoSaved() -> [AutoSavedPosition] {
-        guard let data = NSUbiquitousKeyValueStore.default.data(forKey: autoSaveKey),
-              let positions = try? JSONDecoder().decode([AutoSavedPosition].self, from: data) else {
-            return []
-        }
-        return positions
+        positionStorage.replace(with: autoSavedPositions)
+        autoSavedPositions = positionStorage.values
+        if let error = positionStorage.error { lastError = error }
     }
 
     // MARK: - Position Matching
@@ -361,6 +367,8 @@ final class BookmarkStore {
             return pageA == pageB
         case (.comicPage(let pageA), .comicPage(let pageB)):
             return pageA == pageB
+        case (.textAnchor(let anchorA, _), .textAnchor(let anchorB, _)):
+            return anchorA == anchorB
         case (.textOffset(let offA), .textOffset(let offB)):
             return offA == offB
         case (.epubSpine(let idxA, _), .epubSpine(let idxB, _)):
@@ -410,21 +418,9 @@ final class BookmarkStore {
     // MARK: - Persistence (iCloud key-value store)
 
     private func persist() {
-        do {
-            let data = try JSONEncoder().encode(entries)
-            cloud.set(data, forKey: Self.iCloudKey)
-            cloud.synchronize()
-        } catch {
-            Self.logger.error("Failed to encode bookmarks: \(error)")
-        }
-    }
-
-    private static func loadFromCloud() -> [BookmarkEntry] {
-        guard let data = NSUbiquitousKeyValueStore.default.data(forKey: iCloudKey),
-              let entries = try? JSONDecoder().decode([BookmarkEntry].self, from: data) else {
-            return []
-        }
-        return entries
+        bookmarkStorage.replace(with: entries)
+        entries = bookmarkStorage.values
+        if let error = bookmarkStorage.error { lastError = error }
     }
 
     // MARK: - URL Bookmark Storage (device-local)
@@ -436,7 +432,7 @@ final class BookmarkStore {
     /// is required for sandboxed access across launches.
     func saveURLBookmark(for fileURL: URL, fileHash: String) {
         do {
-            #if os(iOS)
+            #if !os(macOS)
             let data = try fileURL.bookmarkData(includingResourceValuesForKeys: nil,
                                                  relativeTo: nil)
             #else
@@ -449,13 +445,14 @@ final class BookmarkStore {
             Self.logger.info("Saved URL bookmark for \(fileURL.lastPathComponent, privacy: .public) (\(data.count) bytes)")
 
             var stale = false
-            #if os(iOS)
+            #if !os(macOS)
             let resolved = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale)
             #else
             let resolved = try URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale)
             #endif
             Self.logger.info("Bookmark verified: \(resolved.lastPathComponent, privacy: .public), stale=\(stale)")
         } catch {
+            lastError = "This file is readable, but its access could not be remembered. You may need to choose it again from Files. \(error.localizedDescription)"
             Self.logger.error("FAILED to save/verify URL bookmark for \(fileURL.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -478,7 +475,7 @@ final class BookmarkStore {
         }
         do {
             var isStale = false
-            #if os(iOS)
+            #if !os(macOS)
             let url = try URL(resolvingBookmarkData: bookmarkData,
                               bookmarkDataIsStale: &isStale)
             #else
@@ -515,8 +512,14 @@ final class BookmarkStore {
         UserDefaults.standard.set(urlBookmarks, forKey: Self.urlBookmarksKey)
     }
 
-    private static func loadURLBookmarks() -> [String: Data] {
-        UserDefaults.standard.dictionary(forKey: urlBookmarksKey) as? [String: Data] ?? [:]
+    private func loadURLBookmarks() -> [String: Data] {
+        guard let values = UserDefaults.standard.dictionary(forKey: Self.urlBookmarksKey) else { return [:] }
+        let valid = values.compactMapValues { $0 as? Data }
+        if valid.count != values.count {
+            UserDefaults.standard.set(values, forKey: Self.urlBookmarksKey + ".unreadable")
+            lastError = "Some saved file-access references were unreadable. A recovery copy has been preserved; affected files can be selected again."
+        }
+        return valid
     }
 
     // MARK: - FileProvider Reference Storage (device-local, iOS-only effective)
@@ -552,24 +555,44 @@ final class BookmarkStore {
     }
 
     private func persistFileProviderRefs() {
-        if let data = try? JSONEncoder().encode(fileProviderRefs) {
-            UserDefaults.standard.set(data, forKey: Self.fileProviderRefsKey)
+        do {
+            UserDefaults.standard.set(try JSONEncoder().encode(fileProviderRefs), forKey: Self.fileProviderRefsKey)
+        } catch {
+            lastError = "File-provider access could not be remembered: \(error.localizedDescription)"
         }
     }
 
-    private static func loadFileProviderRefs() -> [String: FileProviderRef] {
-        guard let data = UserDefaults.standard.data(forKey: fileProviderRefsKey),
-              let decoded = try? JSONDecoder().decode([String: FileProviderRef].self, from: data) else {
+    private func loadFileProviderRefs() -> [String: FileProviderRef] {
+        guard let data = UserDefaults.standard.data(forKey: Self.fileProviderRefsKey) else { return [:] }
+        do { return try JSONDecoder().decode([String: FileProviderRef].self, from: data) }
+        catch {
+            UserDefaults.standard.set(data, forKey: Self.fileProviderRefsKey + ".unreadable")
+            lastError = "Saved file-provider references could not be decoded. A recovery copy has been preserved; files can be selected again."
             return [:]
         }
-        return decoded
     }
 }
 
-/// Reference to a file vended by a File Provider extension.
-/// Device-local — domain identifiers can differ across devices even for the
-/// same provider account, so this is never synced via iCloud.
+/// Device-local provider identifiers; domains can differ across devices even
+/// for the same account, so these references are never synced through iCloud.
 struct FileProviderRef: Codable, Sendable, Equatable {
     let domain: String
     let item: String
+}
+
+/// Identifies the list membership under which this window began reading.
+struct ReadingSession: Sendable {
+    let fileHash: String
+    let membership: SyncedCollection<AutoSavedPosition>.Membership
+}
+
+private struct ReadingSessionKey: EnvironmentKey {
+    static let defaultValue: ReadingSession? = nil
+}
+
+extension EnvironmentValues {
+    var readingSession: ReadingSession? {
+        get { self[ReadingSessionKey.self] }
+        set { self[ReadingSessionKey.self] = newValue }
+    }
 }

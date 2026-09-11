@@ -34,18 +34,24 @@ final class ReadingPreferences {
 
     // MARK: - Persistence Keys
 
-    private let defaults = UserDefaults.standard
-    private let cloud = NSUbiquitousKeyValueStore.default
+    private let defaults: UserDefaults
+    private let cloud: NSUbiquitousKeyValueStore
+    private let updatePinnedStatus: @MainActor (String) -> Void
     private let globalKey = "manicule.readingPrefs.global"
     private let overridesKey = "manicule.readingPrefs.overrides"
     private let tombstonesKey = "manicule.readingPrefs.overrideTombstones"
     private var overrideTombstones: [String: Date] = [:]
     private var cloudObserver: NSObjectProtocol?
+    private var cloudPayloadIsReadable = true
 
     /// Maximum number of per-book overrides to keep.
     static let maxOverrides = 60
 
-    private init() {
+    init(defaults: UserDefaults = .standard, cloud: NSUbiquitousKeyValueStore = .default,
+         updatePinnedStatus: @escaping @MainActor (String) -> Void = { BookmarkStore.shared.refreshPinnedStatus(for: $0) }) {
+        self.defaults = defaults
+        self.cloud = cloud
+        self.updatePinnedStatus = updatePinnedStatus
         loadFromDefaults()
         mergeFromCloudIfAvailable()
         save()
@@ -53,12 +59,21 @@ final class ReadingPreferences {
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: cloud,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             MainActor.assumeIsolated {
-                self?.mergeFromCloudIfAvailable(refreshPinnedState: true)
+                guard let self else { return }
+                if notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int == NSUbiquitousKeyValueStoreQuotaViolationChange {
+                    self.lastError = ReadingCloud.quotaMessage
+                    return
+                }
+                self.mergeFromCloudIfAvailable(refreshPinnedState: true)
             }
         }
         cloud.synchronize()
+    }
+
+    isolated deinit {
+        if let cloudObserver { NotificationCenter.default.removeObserver(cloudObserver) }
     }
 
     // MARK: - Effective Preferences
@@ -71,7 +86,7 @@ final class ReadingPreferences {
         }
         overrideTombstones[legacyHash] = Date()
         save()
-        BookmarkStore.shared.refreshPinnedStatus(for: fileHash)
+        updatePinnedStatus(fileHash)
     }
 
     /// Returns the effective preferences for a specific file, merging per-book overrides if present.
@@ -143,7 +158,7 @@ final class ReadingPreferences {
         overrideTombstones.removeValue(forKey: fileHash)
         lastError = nil
         save()
-        BookmarkStore.shared.refreshPinnedStatus(for: fileHash)
+        updatePinnedStatus(fileHash)
         return nil
     }
 
@@ -152,7 +167,7 @@ final class ReadingPreferences {
         guard perBookOverrides.removeValue(forKey: fileHash) != nil else { return }
         overrideTombstones[fileHash] = Date()
         save()
-        BookmarkStore.shared.refreshPinnedStatus(for: fileHash)
+        updatePinnedStatus(fileHash)
     }
 
     func clearAllOverrides() {
@@ -161,11 +176,7 @@ final class ReadingPreferences {
         for hash in hashes { overrideTombstones[hash] = now }
         perBookOverrides.removeAll()
         save()
-        for hash in hashes { BookmarkStore.shared.refreshPinnedStatus(for: hash) }
-    }
-
-    func clearLastError() {
-        lastError = nil
+        for hash in hashes { updatePinnedStatus(hash) }
     }
 
     /// Updates a preference for a specific book. Always creates a per-book override
@@ -216,28 +227,33 @@ final class ReadingPreferences {
             let data = try JSONEncoder().encode(global)
             defaults.set(data, forKey: globalKey)
         } catch {
+            lastError = "Unable to save reading settings: \(error.localizedDescription)"
             Self.logger.error("Failed to encode global prefs: \(error)")
         }
         do {
             let data = try JSONEncoder().encode(perBookOverrides)
             defaults.set(data, forKey: overridesKey)
             defaults.set(try JSONEncoder().encode(overrideTombstones), forKey: tombstonesKey)
-            if syncOverrides {
+            if syncOverrides && cloudPayloadIsReadable {
                 let payload = SyncedOverrides(
                     overrides: perBookOverrides,
                     tombstones: overrideTombstones
                 )
-                cloud.set(try JSONEncoder().encode(payload), forKey: overridesKey)
-                cloud.synchronize()
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                let data = try encoder.encode(payload)
+                if data != cloud.data(forKey: overridesKey) {
+                    try ReadingCloud.write(data, key: overridesKey, store: cloud)
+                }
             }
         } catch {
+            lastError = "Reading settings could not be saved or synced: \(error.localizedDescription)"
             Self.logger.error("Failed to encode per-book overrides: \(error)")
         }
     }
 
     private func loadFromDefaults() {
-        if let data = defaults.data(forKey: globalKey),
-           let global = try? JSONDecoder().decode(GlobalPrefs.self, from: data) {
+        if let global = loadSaved(GlobalPrefs.self, key: globalKey) {
             fontFamily = global.fontFamily
             fontSize = global.fontSize
             lineSpacing = global.lineSpacing
@@ -250,13 +266,21 @@ final class ReadingPreferences {
             textAlign = global.textAlign
         }
         // Load per-book overrides from UserDefaults
-        if let data = defaults.data(forKey: overridesKey),
-           let overrides = try? JSONDecoder().decode([String: BookOverride].self, from: data) {
+        if let overrides = loadSaved([String: BookOverride].self, key: overridesKey) {
             perBookOverrides = overrides
         }
-        if let data = defaults.data(forKey: tombstonesKey),
-           let tombstones = try? JSONDecoder().decode([String: Date].self, from: data) {
+        if let tombstones = loadSaved([String: Date].self, key: tombstonesKey) {
             overrideTombstones = tombstones
+        }
+    }
+
+    private func loadSaved<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        do { return try JSONDecoder().decode(type, from: data) }
+        catch {
+            defaults.set(data, forKey: key + ".unreadable")
+            lastError = "Saved settings could not be decoded. A recovery copy has been preserved. \(error.localizedDescription)"
+            return nil
         }
     }
 
@@ -269,8 +293,11 @@ final class ReadingPreferences {
         } else if let legacy = try? JSONDecoder().decode([String: BookOverride].self, from: data) {
             payload = SyncedOverrides(overrides: legacy, tombstones: [:])
         } else {
+            cloudPayloadIsReadable = false
+            lastError = "iCloud reading settings could not be decoded. Local settings and the cloud recovery data have been preserved."
             return
         }
+        cloudPayloadIsReadable = true
 
         for (hash, date) in payload.tombstones {
             if date > (overrideTombstones[hash] ?? .distantPast) {
@@ -282,7 +309,9 @@ final class ReadingPreferences {
             let local = perBookOverrides[hash]
             let localDate = local?.modifiedAt ?? local?.lastUsed ?? .distantPast
             let remoteDate = remote.modifiedAt ?? remote.lastUsed ?? .distantPast
-            var selected = remoteDate >= localDate ? remote : (local ?? remote)
+            let remoteWins = remoteDate > localDate
+                || (remoteDate == localDate && remote.tieBreakKey > (local?.tieBreakKey ?? ""))
+            var selected = remoteWins ? remote : (local ?? remote)
             if let remoteLastUsed = remote.lastUsed,
                remoteLastUsed > (selected.lastUsed ?? .distantPast) {
                 selected.lastUsed = remoteLastUsed
@@ -302,7 +331,7 @@ final class ReadingPreferences {
         save(syncOverrides: refreshPinnedState)
         if refreshPinnedState {
             for hash in previousHashes.union(perBookOverrides.keys) {
-                BookmarkStore.shared.refreshPinnedStatus(for: hash)
+                updatePinnedStatus(hash)
             }
         }
     }
@@ -480,6 +509,17 @@ struct BookOverride: Codable, Sendable {
     var textAlign: TextAlignment?
     var lastUsed: Date?
     var modifiedAt: Date?
+
+    /// Stable order for simultaneous edits with identical timestamps. Usage
+    /// timestamps are merged independently and must not change this winner.
+    var tieBreakKey: String {
+        var value = self
+        value.lastUsed = nil
+        value.modifiedAt = nil
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
 
     /// Returns true if all fields are nil (no overrides set).
     var isEmpty: Bool {

@@ -6,15 +6,21 @@ import os.log
 
 private let browserLog = Logger(subsystem: "com.palefire.manicule", category: "Browser")
 
-/// Holds a successfully opened document and its source URL.
-struct OpenedDocument: Equatable {
+/// Each successful open is a new reader session, even for the same URL.
+struct OpenedDocument {
+    let id = UUID()
     let document: ReaderDocument
-    let fileURL: URL
-    let securityScoped: Bool
+    let access: SecurityScopedFile
+    var fileURL: URL { access.url }
+}
 
-    static func == (lhs: OpenedDocument, rhs: OpenedDocument) -> Bool {
-        lhs.fileURL == rhs.fileURL
+private struct DocumentOpenRequest: Identifiable {
+    enum Source {
+        case file(URL, expectedHash: String? = nil)
+        case recent(AutoSavedPosition)
     }
+    let id = UUID()
+    let source: Source
 }
 
 /// Root view for iOS: shows either the library or the document viewer.
@@ -24,8 +30,10 @@ struct IOSRootView: View {
     @State private var showError: Bool = false
     @State private var showFilePicker: Bool = false
     @State private var showSettings: Bool = false
-    @State private var isOpening: Bool = false
-    @State private var activeOpenRequestID: UUID?
+    @State private var pendingAppIcon: AppIconChoice?
+    @State private var appIconError: String?
+    @State private var openRequest: DocumentOpenRequest?
+    @State private var changedFileURL: URL?
     var body: some View {
         Group {
             if let opened = openedDocument {
@@ -36,15 +44,41 @@ struct IOSRootView: View {
                         onClose: { closeDocument() }
                     )
                     .navigationBarTitleDisplayMode(.inline)
-                    // Fresh view identity per file. Without this, opening a
+                    // Fresh view identity per open. Without this, opening a
                     // document while another is showing (onOpenURL, shared
                     // file) reuses the reader's @State — stale pages, stale
                     // restore tasks, even the previous book's content.
-                    .id(opened.fileURL)
+                    .id(opened.id)
                 }
             } else {
                 libraryView
             }
+        }
+        .task(id: openedDocument?.id) {
+            guard let opened = openedDocument else { return }
+            await FileProviderPrimer.captureFileProviderRef(url: opened.access.url, fileHash: opened.document.fileHash)
+        }
+        .task(id: openedDocument?.id) {
+            guard let opened = openedDocument else { return }
+            let observation = FileChangeObservation(url: opened.fileURL)
+            defer { observation.stop() }
+            for await url in observation.changes {
+                guard !Task.isCancelled else { return }
+                changedFileURL = url
+            }
+        }
+        .confirmationDialog("The source file changed", isPresented: Binding(
+            get: { changedFileURL != nil },
+            set: { if !$0 { changedFileURL = nil } }
+        ), titleVisibility: .visible) {
+            Button("Reload File") {
+                guard let url = changedFileURL else { return }
+                changedFileURL = nil
+                openRequest = DocumentOpenRequest(source: .file(url))
+            }
+            Button("Keep Reading This Copy", role: .cancel) { changedFileURL = nil }
+        } message: {
+            Text("Your current reading copy is unchanged. Reload to read the source file again. If it is unavailable, you can keep reading this copy.")
         }
         .onOpenURL { url in
             browserLog.info("onOpenURL: \(url.absoluteString, privacy: .public)")
@@ -66,17 +100,13 @@ struct IOSRootView: View {
         } message: {
             Text(errorMessage ?? "An unknown error occurred.")
         }
-        .sheet(isPresented: Binding(
-            get: { pickerDirectoryURL != nil },
-            set: { if !$0 { pickerDirectoryURL = nil; pickerFileName = nil } }
-        )) {
+        .sheet(item: $fileToLocate) { entry in
             LocateFilePickerView(
-                directoryURL: pickerDirectoryURL,
-                fileName: pickerFileName,
+                directoryURL: Self.parentDirectoryURL(for: entry),
+                fileName: entry.fileName,
                 onOpen: { url in
-                    pickerDirectoryURL = nil
-                    pickerFileName = nil
-                    beginOpeningDocument(at: url)
+                    fileToLocate = nil
+                    openRequest = DocumentOpenRequest(source: .file(url, expectedHash: entry.id))
                 }
             )
         }
@@ -87,11 +117,22 @@ struct IOSRootView: View {
                 onOpen: { url in beginOpeningDocument(at: url) }
             )
         }
-        .sheet(isPresented: $showSettings) {
-            IOSSettingsView()
+        .sheet(isPresented: $showSettings, onDismiss: changeAppIconAfterSettingsDismissal) {
+            IOSSettingsView { choice in
+                pendingAppIcon = choice
+                showSettings = false
+            }
+        }
+        .alert("Couldn't Change App Icon", isPresented: Binding(
+            get: { appIconError != nil },
+            set: { if !$0 { appIconError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(appIconError ?? "Unknown error")
         }
         .overlay {
-            if isOpening {
+            if openRequest != nil {
                 ZStack {
                     Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
                     ProgressView("Opening…")
@@ -102,9 +143,29 @@ struct IOSRootView: View {
             }
         }
         .task { await FileProviderPrimer.startPrewarm() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            AppIconStore.shared.refresh()
+        }
+        .task(id: openRequest?.id) {
+            guard let request = openRequest else { return }
+            await performOpenRequest(request)
+        }
     }
 
     // MARK: - Library View
+
+    private func changeAppIconAfterSettingsDismissal() {
+        guard let choice = pendingAppIcon else { return }
+        pendingAppIcon = nil
+        // Leave SwiftUI's dismissal callback before UIKit starts another presentation.
+        Task { @MainActor in
+            do {
+                try await AppIconStore.shared.change(to: choice)
+            } catch {
+                appIconError = error.localizedDescription
+            }
+        }
+    }
 
     private var libraryView: some View {
         let trackedBooks = BookmarkStore.shared.autoSavedPositions
@@ -117,7 +178,7 @@ struct IOSRootView: View {
                 } else {
                     RecentsGridSection(
                         books: trackedBooks,
-                        onTap: { entry in Task { await openRecentBook(entry) } },
+                        onTap: { entry in openRequest = DocumentOpenRequest(source: .recent(entry)) },
                         onRemove: { entry in removeFromList(entry) }
                     )
                 }
@@ -127,6 +188,8 @@ struct IOSRootView: View {
                     Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                     }
+                    .accessibilityLabel("Settings")
+                    .accessibilityIdentifier("library-settings")
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showFilePicker = true } label: {
@@ -140,7 +203,7 @@ struct IOSRootView: View {
     private var emptyLibrary: some View {
         VStack(spacing: 20) {
             Spacer()
-            Image("LaunchBackground")
+            Image(AppIconStore.shared.choice.imageName)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 200, height: 200)
@@ -166,32 +229,19 @@ struct IOSRootView: View {
 
     // MARK: - Open from Recents
 
-    /// When non-nil, a document picker is presented pointing at this directory
-    /// so the user can tap the file to grant access.
-    @State private var pickerDirectoryURL: URL?
-    @State private var pickerFileName: String?
+    /// The picker retains the expected identity even while its sheet dismisses.
+    @State private var fileToLocate: AutoSavedPosition?
 
-    private func openRecentBook(_ entry: AutoSavedPosition) async {
+    private func openRecentBook(_ entry: AutoSavedPosition, requestID: UUID) async throws {
         browserLog.info("openRecentBook: \(entry.fileName, privacy: .public), path=\(entry.filePathString ?? "nil", privacy: .public), hint=\(entry.relativePathHint ?? "nil", privacy: .public)")
 
-        if await openUsingStoredAccess(entry) {
+        if try await openUsingStoredAccess(entry, requestID: requestID) {
             return
         }
 
-        // Present a document picker pointed at the file's parent folder.
-        //    iOS requires the user to tap the file once to grant access.
-        //    The picker opens in the right folder — one tap to open.
-        if let dirURL = Self.parentDirectoryURL(for: entry) {
-            browserLog.info("Presenting picker at \(dirURL.path, privacy: .public)")
-            pickerFileName = entry.fileName
-            pickerDirectoryURL = dirURL
-            return
-        }
+        try checkOpenRequest(requestID)
 
-        // No path info at all — open a general picker
-        browserLog.info("No path info, presenting general picker")
-        pickerFileName = entry.fileName
-        pickerDirectoryURL = URL(fileURLWithPath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/")
+        fileToLocate = entry
     }
 
     /// Build candidate file URLs from all synced path information.
@@ -235,92 +285,85 @@ struct IOSRootView: View {
 
     // MARK: - Document handling
 
-    private func openUsingStoredAccess(_ entry: AutoSavedPosition) async -> Bool {
+    private func openUsingStoredAccess(_ entry: AutoSavedPosition, requestID: UUID) async throws -> Bool {
+        try checkOpenRequest(requestID)
         if let url = BookmarkStore.shared.resolveURL(for: entry.id),
-           await openDocument(at: url, showError: false) == nil {
+           await openDocument(at: url, requestID: requestID, showError: false, expectedHash: entry.id) {
             return true
         }
 
+        try checkOpenRequest(requestID)
         if let ref = BookmarkStore.shared.fileProviderRef(for: entry.id),
-           let url = await FileProviderPrimer.resolveFileProviderURL(ref, budget: .probe),
-           await openDocument(at: url, showError: false) == nil {
-            browserLog.info("FileProvider resolved to \(url.lastPathComponent, privacy: .public)")
-            return true
+           let url = await FileProviderPrimer.resolveFileProviderURL(ref, budget: .probe) {
+            try checkOpenRequest(requestID)
+            if await openDocument(at: url, requestID: requestID, showError: false, expectedHash: entry.id) { return true }
         }
 
         for url in Self.candidateURLs(for: entry) {
+            try checkOpenRequest(requestID)
             guard FileManager.default.isReadableFile(atPath: url.path) else { continue }
-            if await openDocument(at: url, showError: false) == nil {
-                browserLog.info("Direct access at \(url.path, privacy: .public)")
-                return true
-            }
+            if await openDocument(at: url, requestID: requestID, showError: false, expectedHash: entry.id) { return true }
         }
-
         return false
     }
 
     private func beginOpeningDocument(at url: URL) {
-        Task { await openDocument(at: url) }
+        openRequest = DocumentOpenRequest(source: .file(url))
+    }
+
+    private func checkOpenRequest(_ id: UUID) throws {
+        try Task.checkCancellation()
+        guard openRequest?.id == id else { throw CancellationError() }
+    }
+
+    /// The SwiftUI task owns the entire lookup, including provider fallbacks.
+    private func performOpenRequest(_ request: DocumentOpenRequest) async {
+        defer {
+            if openRequest?.id == request.id { openRequest = nil }
+        }
+        do {
+            try checkOpenRequest(request.id)
+            switch request.source {
+            case .file(let url, let expectedHash):
+                await openDocument(at: url, requestID: request.id, expectedHash: expectedHash)
+            case .recent(let entry):
+                try await openRecentBook(entry, requestID: request.id)
+            }
+        } catch is CancellationError {
+            // A new selection or closing the window superseded this request.
+        } catch {
+            presentOpenError(error)
+        }
     }
 
     @discardableResult
-    private func openDocument(at url: URL, showError: Bool = true) async -> Error? {
-        let requestID = UUID()
-        activeOpenRequestID = requestID
-        isOpening = true
-        defer {
-            if activeOpenRequestID == requestID {
-                activeOpenRequestID = nil
-                isOpening = false
-            }
-        }
-
-        let accessing = url.startAccessingSecurityScopedResource()
-        browserLog.info("Opening \(url.lastPathComponent, privacy: .public), securityScoped=\(accessing)")
-
+    private func openDocument(at url: URL, requestID: UUID, showError: Bool = true, expectedHash: String? = nil) async -> Bool {
         do {
-            let filename = url.lastPathComponent
-            let (data, content, hash) = try await Task.detached(priority: .userInitiated) {
-                let data = try Data(contentsOf: url, options: .mappedIfSafe)
-                let ext = url.pathExtension.lowercased()
-                let contentType = UTType(filenameExtension: ext) ?? .data
-                let content = try DocumentContent.parse(
-                    data: data,
-                    contentType: contentType,
-                    filename: filename
-                )
-                return (data, content, FileHasher.hash(data: data))
-            }.value
-
-            // A second open request may have arrived while parsing. Never let
-            // an older, slower archive replace the newer selection.
-            guard activeOpenRequestID == requestID else {
-                if accessing { url.stopAccessingSecurityScopedResource() }
-                return CancellationError()
+            try checkOpenRequest(requestID)
+            let access = SecurityScopedFile(url: url)
+            let loader = Task.detached(priority: .userInitiated) {
+                try ReaderDocument.read(from: access.url, expectedHash: expectedHash)
             }
-
-            let doc = ReaderDocument(content: content, rawData: data, fileHash: hash)
-            if let previous = openedDocument, previous.securityScoped {
-                previous.fileURL.stopAccessingSecurityScopedResource()
+            let doc = try await withTaskCancellationHandler {
+                try await loader.value
+            } onCancel: {
+                loader.cancel()
             }
-            openedDocument = OpenedDocument(
-                document: doc,
-                fileURL: url,
-                securityScoped: accessing
-            )
+            try checkOpenRequest(requestID)
+
+            openedDocument = OpenedDocument(document: doc, access: access)
+            let hash = doc.fileHash
             BookmarkStore.shared.saveURLBookmark(for: url, fileHash: hash)
             BookmarkStore.shared.updatePathHint(for: hash, url: url)
-            CoverThumbnailCache.shared.generateIfNeeded(for: content, fileHash: hash)
-            Task { await FileProviderPrimer.captureFileProviderRef(url: url, fileHash: hash) }
+            CoverThumbnailCache.shared.generateIfNeeded(for: doc.content, fileHash: hash)
             browserLog.info("Document opened successfully: \(url.lastPathComponent, privacy: .public)")
-            return nil
+            return true
         } catch {
-            browserLog.error("Failed to open: \(error.localizedDescription, privacy: .public)")
-            if accessing { url.stopAccessingSecurityScopedResource() }
-            if showError && activeOpenRequestID == requestID && !(error is CancellationError) {
+            browserLog.error("Failed to open \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            if showError && openRequest?.id == requestID && !Task.isCancelled && !(error is CancellationError) {
                 presentOpenError(error)
             }
-            return error
+            return false
         }
     }
 
@@ -330,9 +373,8 @@ struct IOSRootView: View {
     }
 
     private func closeDocument() {
-        if let opened = openedDocument, opened.securityScoped {
-            opened.fileURL.stopAccessingSecurityScopedResource()
-        }
+        changedFileURL = nil
+        openRequest = nil
         openedDocument = nil
     }
 
@@ -341,11 +383,12 @@ struct IOSRootView: View {
 // MARK: - Settings
 
 struct IOSSettingsView: View {
+    let onChooseAppIcon: (AppIconChoice) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         TabView {
-            ReadingSettingsView(fileHash: nil)
+            ReadingSettingsView(fileHash: nil, onChooseAppIcon: onChooseAppIcon)
                 .tabItem { Label("Reading", systemImage: "textformat.size") }
             NavigationStack {
                 PerBookSettingsView()
@@ -376,7 +419,7 @@ private struct RecentsGridSection: View {
         ScrollView {
             VStack(spacing: 0) {
                 // Centered logo
-                Image("LaunchBackground")
+                Image(AppIconStore.shared.choice.imageName)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 140, height: 140)
@@ -540,10 +583,21 @@ private struct RecentBookCell: View {
 
     private func generateCover(from url: URL, cache: CoverThumbnailCache) async -> Bool {
         let fileHash = entry.id
-        await Task.detached(priority: .utility) {
-            guard let data = try? Data(contentsOf: url) else { return }
-            cache.generateFromFileSync(at: url, data: data, fileHash: fileHash)
-        }.value
+        let access = SecurityScopedFile(url: url)
+        let worker = Task.detached(priority: .utility) {
+            try ReaderDocument.read(from: access.url, expectedHash: fileHash)
+        }
+        do {
+            let document = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+            try Task.checkCancellation()
+            // A recent URL can now refer to different bytes. Never cache the
+            // replacement's cover under the previous document's identity.
+            guard document.fileHash == fileHash else { return false }
+            cache.generateIfNeeded(for: document.content, fileHash: fileHash)
+            await cache.waitForCover(for: fileHash)
+        } catch { return false }
 
         if !Task.isCancelled, let cached = cache.cachedPath(for: fileHash),
            let image = UIImage(contentsOfFile: cached.path) {
