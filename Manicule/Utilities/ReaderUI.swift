@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - View Mode Menu
 
@@ -280,5 +281,113 @@ private struct ReaderSearchErrorModifier: ViewModifier {
 extension View {
     func readerSearchError(_ error: Binding<String?>) -> some View {
         modifier(ReaderSearchErrorModifier(error: error))
+    }
+}
+
+/// A mostly opaque tint keeps reader controls legible over page content. Respect the
+/// system's Reduce Transparency preference without dimming the controls themselves.
+struct ReaderChromeBackground: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        Rectangle()
+            .fill(.background)
+            .opacity(reduceTransparency ? 1 : 0.95)
+    }
+}
+
+/// Page numbers are one-based in the UI; navigation callbacks use source indices.
+struct ReaderPageField: View {
+    let page: Int
+    let pageCount: Int
+    let goToPage: (Int) -> Void
+    var onEditingChanged: (Bool) -> Void = { _ in }
+    var label = "Page"
+    var isEstimated = false
+    @State private var keyboardVisible = false
+    @State private var pendingPage: Int?
+    @State private var draft = ""
+    @FocusState private var isEditing: Bool
+
+    private var target: Int? { PageNavigation.requestedIndex(draft, pageCount: pageCount) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(label) { isEditing = true }
+                .buttonStyle(.plain)
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("reader-page-focus")
+            TextField(String(page), text: $draft)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .frame(width: max(48, CGFloat(String(max(1, pageCount)).count) * 10), height: 44)
+                .padding(.horizontal, 8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6).strokeBorder(.primary.opacity(0.25))
+                        .allowsHitTesting(false)
+                }
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { isEditing = true })
+                .focused($isEditing)
+                .accessibilityLabel(isEstimated ? "Estimated page number" : "Page number")
+                .accessibilityHint("Enter a page from 1 to \(pageCount), then press Return or tap Go")
+                .accessibilityIdentifier("reader-page-number")
+                #if os(iOS) || os(visionOS)
+                .keyboardType(.numbersAndPunctuation)
+                .submitLabel(.go)
+                #endif
+                .onSubmit(commit)
+            if isEditing {
+                Button(action: commit) {
+                    Text("Go").frame(minWidth: 36, minHeight: 32)
+                }
+                    .buttonStyle(.bordered)
+                    .disabled(target == nil)
+                    .accessibilityIdentifier("reader-page-go")
+            }
+        }
+        .font(.caption)
+        .monospacedDigit()
+        .onAppear { draft = String(page) }
+        .onChange(of: page) { _, newPage in
+            if !isEditing && !keyboardVisible { draft = String(newPage) }
+        }
+        .onChange(of: isEditing) { _, editing in
+            // UIKit can end editing before SwiftUI delivers onSubmit (notably
+            // on iPhone). Preserve the entered number until submission reads it.
+            if editing { draft = "" }
+            if editing || !keyboardVisible { onEditingChanged(editing) }
+        }
+        #if os(iOS) || os(visionOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification).receive(on: DispatchQueue.main)) { _ in
+            keyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification).receive(on: DispatchQueue.main)) { _ in
+            keyboardVisible = false
+            if let page = pendingPage {
+                pendingPage = nil
+                DispatchQueue.main.async { goToPage(page) }
+            }
+            if !isEditing {
+                draft = String(page)
+                onEditingChanged(false)
+            }
+        }
+        #endif
+        .onDisappear { Task { @MainActor in onEditingChanged(false) } }
+    }
+
+    private func commit() {
+        guard pendingPage == nil, let target else { return }
+        // Foliate restores its viewport anchor during keyboard resizing. Navigate
+        // after that resize finishes so it cannot overwrite the requested page.
+        if keyboardVisible {
+            pendingPage = target
+            isEditing = false
+        } else {
+            isEditing = false
+            DispatchQueue.main.async { goToPage(target) }
+        }
     }
 }

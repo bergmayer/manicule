@@ -31,6 +31,9 @@ struct PDFReaderView: View {
     @State private var originalPDFBounds: [Int: CGRect] = [:]
     @State private var trimmedPages: Set<Int> = []
     @State private var trimTask: Task<Void, Never>?
+    private var coverOnRight: Bool { readingPrefs.effective(for: fileHash).coverOnRight }
+    @State private var pageEntryTwoUp: Bool?
+    @State private var pairingAnchorPage: Int?
     private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
     @State private var zoomScale: Double? = nil
     @State private var viewWidth: CGFloat = 0
@@ -63,7 +66,7 @@ struct PDFReaderView: View {
 
     private var effectiveTwoUp: Bool {
         guard isPaginated else { return false }
-        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
+        return pageEntryTwoUp ?? twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
     var body: some View {
@@ -100,7 +103,13 @@ struct PDFReaderView: View {
                 },
                 onToggleImmersive: { showChrome.toggle() },
                 onZoomIn: { zoomScale = min(4.0, (zoomScale ?? 1.0) * 1.25) },
-                onZoomOut: { zoomScale = max(0.25, (zoomScale ?? 1.0) / 1.25) }
+                onZoomOut: {
+                    #if os(macOS)
+                    zoomScale = max(0.25, (zoomScale ?? 1.0) / 1.25)
+                    #else
+                    zoomScale = max(0.95, (zoomScale ?? 1.0) / 1.25)
+                    #endif
+                }
             ))
             .onReaderCommand(.showGoToPage) {
                 showGoToPage = true
@@ -110,8 +119,13 @@ struct PDFReaderView: View {
                 searchDebouncer.handle(newQuery, perform: performPdfSearch, clear: clearPdfSearch)
             }
             .onChange(of: currentPageIndex) { _, newPage in
+                if let anchor = pairingAnchorPage,
+                   PageNavigation.normalizedStart(current: anchor, pageCount: pageCount,
+                       twoUp: effectiveTwoUp, coverOnRight: coverOnRight) != newPage {
+                    pairingAnchorPage = nil
+                }
                 let normalized = PageNavigation.normalizedStart(
-                    current: newPage, pageCount: pageCount, twoUp: effectiveTwoUp)
+                    current: newPage, pageCount: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
                 if normalized != newPage {
                     currentPageIndex = normalized
                     return
@@ -119,9 +133,14 @@ struct PDFReaderView: View {
                 if trimWhitespace && isPaginated { trimPagesAround(newPage) }
                 autoSavePosition()
             }
+            .onChange(of: coverOnRight) { _, _ in
+                currentPageIndex = PageNavigation.normalizedStart(
+                    current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp,
+                    coverOnRight: coverOnRight)
+            }
             .onChange(of: effectiveTwoUp) { _, isTwoUp in
                 currentPageIndex = PageNavigation.normalizedStart(
-                    current: currentPageIndex, pageCount: pageCount, twoUp: isTwoUp)
+                    current: currentPageIndex, pageCount: pageCount, twoUp: isTwoUp, coverOnRight: coverOnRight)
             }
             .alert("Go to Page", isPresented: $showGoToPage) {
                 TextField("Page number", text: $goToPageText)
@@ -276,17 +295,39 @@ struct PDFReaderView: View {
 
     @ViewBuilder
     private func pdfContentView(doc: PDFDocument) -> some View {
+        #if os(iOS) || os(visionOS)
+        if isPaginated && effectiveTwoUp {
+            PaginatedPDFContainerView(
+                document: doc, currentPage: $currentPageIndex, coverOnRight: coverOnRight,
+                scaleFactor: zoomScale, highlightSelection: currentHighlightSelection,
+                onToggleChrome: { showChrome.toggle() },
+                onNextPage: nextPage, onPreviousPage: previousPage)
+        } else {
+            nativePDFContent(doc: doc)
+        }
+        #else
+        nativePDFContent(doc: doc)
+        #endif
+    }
+
+    private func nativePDFContent(doc: PDFDocument) -> some View {
         PDFViewRepresentable(
             pdfDocument: doc,
             currentPageIndex: $currentPageIndex,
             paginated: isPaginated,
             twoUp: effectiveTwoUp,
+            coverOnRight: coverOnRight,
             scaleFactor: zoomScale,
             highlightSelection: currentHighlightSelection,
             onToggleChrome: { showChrome.toggle() },
             onNextPage: nextPage,
             onPreviousPage: previousPage
         )
+        #if os(macOS)
+        .padding(.leading, isPaginated && effectiveTwoUp && coverOnRight && currentPageIndex == 0 ? viewWidth / 2 : 0)
+        .padding(.trailing, isPaginated && effectiveTwoUp && currentPageIndex == pageCount - 1
+            && !(coverOnRight && currentPageIndex == 0) ? viewWidth / 2 : 0)
+        #endif
         #if os(iOS)
         // PDFKit's page-view-controller and two-up modes are configured only
         // at construction time, so recreate the native view when mode changes.
@@ -348,7 +389,7 @@ struct PDFReaderView: View {
         .padding(.horizontal)
         .padding(.vertical, 20)
         .background {
-            Rectangle().fill(.bar).ignoresSafeArea(edges: .top)
+            ReaderChromeBackground().ignoresSafeArea(edges: .top)
         }
     }
     #endif
@@ -360,7 +401,7 @@ struct PDFReaderView: View {
         PageNavigation.normalizedStart(
             current: sliderDragging ? sliderPageIndex : currentPageIndex,
             pageCount: pageCount,
-            twoUp: effectiveTwoUp
+            twoUp: effectiveTwoUp, coverOnRight: coverOnRight
         )
     }
 
@@ -405,8 +446,17 @@ struct PDFReaderView: View {
                 }
             }
             HStack {
-                Text(ReaderHelpers.pageLabel(current: displayedPageIndex, total: pageCount, twoUp: effectiveTwoUp))
+                Text(ReaderHelpers.pageLabel(current: displayedPageIndex, total: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight))
                     .font(.caption).monospacedDigit()
+                ReaderPageField(page: displayedPageIndex + 1, pageCount: pageCount, goToPage: { index in
+                    sliderDragging = false
+                    currentPageIndex = PageNavigation.normalizedStart(
+                        current: index, pageCount: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
+                }, onEditingChanged: { editing in
+                    // Keep the page pairing stable until the keyboard finishes closing.
+                    let pairing = editing ? effectiveTwoUp : nil
+                    DispatchQueue.main.async { pageEntryTwoUp = pairing }
+                })
                 Spacer()
                 let pct = pageCount > 1 ? Int(Double(displayedPageIndex) / Double(pageCount - 1) * 100) : 0
                 Text("\(pct)%").font(.caption).monospacedDigit()
@@ -414,7 +464,7 @@ struct PDFReaderView: View {
             .padding(.horizontal)
             .padding(.vertical, 6)
         }
-        .background(.bar)
+        .background { ReaderChromeBackground().ignoresSafeArea(edges: .bottom) }
     }
 
     // MARK: - Toolbar
@@ -430,13 +480,13 @@ struct PDFReaderView: View {
                 Label("Previous Page", systemImage: "chevron.left")
             }
             .disabled(!PageNavigation.canGoPrevious(
-                current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp))
+                current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight))
 
             Button(action: nextPage) {
                 Label("Next Page", systemImage: "chevron.right")
             }
             .disabled(!PageNavigation.canGoNext(
-                current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp))
+                current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight))
         }
 
         ToolbarItem(placement: .automatic) {
@@ -497,18 +547,18 @@ struct PDFReaderView: View {
     }
 
     private var pageLabel: String {
-        ReaderHelpers.pageLabel(current: currentPageIndex, total: pageCount, twoUp: effectiveTwoUp)
+        ReaderHelpers.pageLabel(current: currentPageIndex, total: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
     }
 
     private func previousPage() {
         let newIndex = PageNavigation.previous(
-            current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp)
+            current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
         if newIndex != currentPageIndex { currentPageIndex = newIndex }
     }
 
     private func nextPage() {
         let newIndex = PageNavigation.next(
-            current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp)
+            current: currentPageIndex, pageCount: pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
         if newIndex != currentPageIndex { currentPageIndex = newIndex }
     }
 
@@ -651,10 +701,12 @@ struct PDFReaderView: View {
     }
 
     private func selectTwoPage() {
-
+        let anchor = pairingAnchorPage ?? currentPageIndex
+        let shifted = effectiveTwoUp ? !coverOnRight : coverOnRight
+        pairingAnchorPage = anchor
+        readingPrefs.setViewMode(.paginated, twoUp: true, coverOnRight: shifted, for: fileHash)
         currentPageIndex = PageNavigation.normalizedStart(
-            current: currentPageIndex, pageCount: pageCount, twoUp: true)
-        readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
+            current: anchor, pageCount: pageCount, twoUp: true, coverOnRight: shifted)
     }
 
     private func selectScrolling() {

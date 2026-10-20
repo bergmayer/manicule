@@ -24,6 +24,8 @@ struct PaginatedContainer<PageVC: PaginatedPageVC>: UIViewControllerRepresentabl
     let supportsTrackpadPan: Bool
     let layoutKey: AnyHashable
     let onToggleChrome: () -> Void
+    var handlesTapZones: Bool = true
+    var updateViewController: ((PageVC) -> Void)? = nil
     let makeViewController: (Int) -> PageVC?
 
     func makeUIViewController(context: Context) -> UIPageViewController {
@@ -36,10 +38,12 @@ struct PaginatedContainer<PageVC: PaginatedPageVC>: UIViewControllerRepresentabl
         pageVC.delegate = context.coordinator
         pageVC.view.backgroundColor = backgroundColor
 
-        let singleTap = UITapGestureRecognizer(target: context.coordinator,
-                                                action: #selector(Coordinator.handleSingleTap(_:)))
-        singleTap.numberOfTapsRequired = 1
-        pageVC.view.addGestureRecognizer(singleTap)
+        if handlesTapZones {
+            let singleTap = UITapGestureRecognizer(target: context.coordinator,
+                                                    action: #selector(Coordinator.handleSingleTap(_:)))
+            singleTap.numberOfTapsRequired = 1
+            pageVC.view.addGestureRecognizer(singleTap)
+        }
 
         if supportsTrackpadPan {
             let trackpadPan = UIPanGestureRecognizer(target: context.coordinator,
@@ -73,6 +77,9 @@ struct PaginatedContainer<PageVC: PaginatedPageVC>: UIViewControllerRepresentabl
                     currentPage > (displayedPage ?? 0) ? .forward : .reverse
                 pageVC.setViewControllers([vc], direction: direction, animated: false)
             }
+        }
+        if let displayed = pageVC.viewControllers?.first as? PageVC {
+            updateViewController?(displayed)
         }
         coord.currentPage = currentPage
     }
@@ -144,8 +151,17 @@ struct PaginatedContainer<PageVC: PaginatedPageVC>: UIViewControllerRepresentabl
                                 transitionCompleted completed: Bool) {
             guard completed,
                   let vc = pageViewController.viewControllers?.first as? PageVC else { return }
-            currentPage = vc.pageIndex
-            currentPageBinding.wrappedValue = vc.pageIndex
+            let index = vc.pageIndex
+            currentPage = index
+            guard currentPageBinding.wrappedValue != index else { return }
+            // UIKit can finish a transition during a SwiftUI controller update.
+            // Publish only genuine turns, after that update has completed.
+            DispatchQueue.main.async { [weak self, weak pageViewController] in
+                guard let self, let pageViewController,
+                      self.displayedPageIndex(from: pageViewController) == index,
+                      self.currentPageBinding.wrappedValue != index else { return }
+                self.currentPageBinding.wrappedValue = index
+            }
         }
 
         // MARK: - Tap Zones

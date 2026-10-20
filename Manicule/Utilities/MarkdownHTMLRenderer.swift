@@ -3,6 +3,13 @@ import Foundation
 /// Small, dependency-free Markdown renderer shared by the reader and Quick Look.
 /// It intentionally supports the subset needed for local document previews.
 enum MarkdownHTMLRenderer {
+    nonisolated struct Block: Sendable {
+        let html: String
+        let sourceLine: Int
+        let endLine: Int
+        let headingIndex: Int?
+    }
+
     private struct Cursor {
         let lines: [String]
         var index = 0
@@ -14,11 +21,24 @@ enum MarkdownHTMLRenderer {
         headingAnchorPrefix: String? = nil,
         includeSourceLines: Bool = false
     ) -> String {
+        blocks(markdown, headingAnchorPrefix: headingAnchorPrefix,
+               includeSourceLines: includeSourceLines).map(\.html).joined(separator: "\n")
+    }
+
+    /// Complete top-level blocks let the reader section large documents without
+    /// splitting lists, tables, or fenced code across HTML documents.
+    nonisolated static func blocks(
+        _ markdown: String,
+        headingAnchorPrefix: String? = nil,
+        includeSourceLines: Bool = false
+    ) -> [Block] {
         var cursor = Cursor(lines: markdown.components(separatedBy: "\n"))
         var html: [String] = []
+        var result: [Block] = []
 
         while cursor.index < cursor.lines.count {
             let sourceLine = cursor.index
+            let headingIndex = cursor.headingIndex
             let previousCount = html.count
             let trimmed = trim(cursor.lines[cursor.index])
             if trimmed.isEmpty {
@@ -51,9 +71,14 @@ enum MarkdownHTMLRenderer {
                let end = html[html.count - 1].firstIndex(of: ">") {
                 html[html.count - 1].insert(contentsOf: " data-source-line=\"\(sourceLine)\"", at: end)
             }
+            if html.count > previousCount {
+                result.append(Block(html: html.removeLast(), sourceLine: sourceLine,
+                    endLine: max(sourceLine, cursor.index - 1),
+                    headingIndex: cursor.headingIndex > headingIndex ? headingIndex : nil))
+            }
         }
 
-        return html.filter { !$0.isEmpty }.joined(separator: "\n")
+        return result
     }
 
     private nonisolated static func renderFencedCode(cursor: inout Cursor) -> String {

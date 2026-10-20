@@ -10,15 +10,18 @@ struct PaginatedComicContainerView: View {
     let pages: [URL]
     @Binding var currentPage: Int
     let twoUp: Bool
+    var coverOnRight: Bool = false
     let readingDirection: ComicArchive.ReadingDirection
     var trimWhitespace: Bool = false
     let onToggleChrome: () -> Void
 
     var body: some View {
         PaginatedContainer<ComicPageZoomViewController>(
-            pageCount: pages.count,
-            currentPage: $currentPage,
-            pageStep: twoUp ? 2 : 1,
+            pageCount: twoUp ? PageNavigation.spreadCount(pageCount: pages.count, coverOnRight: coverOnRight) : pages.count,
+            currentPage: Binding(
+                get: { twoUp ? PageNavigation.spreadIndex(page: currentPage, coverOnRight: coverOnRight) : currentPage },
+                set: { currentPage = twoUp ? PageNavigation.spreadStart(index: $0, coverOnRight: coverOnRight) : $0 }),
+            pageStep: 1,
             backgroundColor: .black,
             interPageSpacing: 2,
             supportsTrackpadPan: false,
@@ -28,15 +31,18 @@ struct PaginatedComicContainerView: View {
             // a swap to a smaller archive.
             layoutKey: AnyHashable([
                 AnyHashable(twoUp),
+                AnyHashable(coverOnRight),
                 AnyHashable(readingDirection),
                 AnyHashable(trimWhitespace),
                 AnyHashable(pages.count)
             ]),
             onToggleChrome: onToggleChrome
-        ) { index in
+        ) { ordinal in
+            let index = twoUp ? PageNavigation.spreadStart(index: ordinal, coverOnRight: coverOnRight) : ordinal
             guard index >= 0, index < pages.count else { return nil }
             if twoUp {
-                let secondIndex = index + 1 < pages.count ? index + 1 : nil
+                let isCover = coverOnRight && index == 0
+                let secondIndex = !isCover && index + 1 < pages.count ? index + 1 : nil
                 let leftURL: URL
                 let rightURL: URL?
                 if readingDirection == .leftToRight {
@@ -49,18 +55,22 @@ struct PaginatedComicContainerView: View {
                 return ComicPageZoomViewController(
                     primaryImageURL: leftURL,
                     secondaryImageURL: rightURL,
-                    pageIndex: index,
-                    trimWhitespace: trimWhitespace
+                    pageIndex: ordinal,
+                    trimWhitespace: trimWhitespace,
+                    singlePageOnRight: secondIndex == nil
+                        ? (isCover == (readingDirection == .leftToRight)) : nil
                 )
             } else {
                 return ComicPageZoomViewController(
                     primaryImageURL: pages[index],
                     secondaryImageURL: nil,
-                    pageIndex: index,
+                    pageIndex: ordinal,
                     trimWhitespace: trimWhitespace
                 )
             }
         }
+        // Rebuild the native pager so prefetched neighbors use the new pairing too.
+        .id(coverOnRight)
     }
 }
 
@@ -70,6 +80,7 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
     let secondaryImageURL: URL?
     let pageIndex: Int
     let trimWhitespace: Bool
+    let singlePageOnRight: Bool?
 
     private var scrollView: UIScrollView!
     private var contentView: UIView!
@@ -78,11 +89,12 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
     private var imageLoadTask: Task<Void, Never>?
     private var didStartImageLoad = false
 
-    init(primaryImageURL: URL, secondaryImageURL: URL?, pageIndex: Int, trimWhitespace: Bool = false) {
+    init(primaryImageURL: URL, secondaryImageURL: URL?, pageIndex: Int, trimWhitespace: Bool = false, singlePageOnRight: Bool? = nil) {
         self.primaryImageURL = primaryImageURL
         self.secondaryImageURL = secondaryImageURL
         self.pageIndex = pageIndex
         self.trimWhitespace = trimWhitespace
+        self.singlePageOnRight = singlePageOnRight
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -143,6 +155,15 @@ class ComicPageZoomViewController: UIViewController, UIScrollViewDelegate, Pagin
                 secondaryImageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
                 secondaryImageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
                 secondaryImageView.widthAnchor.constraint(equalTo: contentView.widthAnchor, multiplier: 0.5),
+            ])
+        } else if let singlePageOnRight {
+            NSLayoutConstraint.activate([
+                primaryImageView.topAnchor.constraint(equalTo: contentView.topAnchor),
+                primaryImageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                primaryImageView.widthAnchor.constraint(equalTo: contentView.widthAnchor, multiplier: 0.5),
+                singlePageOnRight
+                    ? primaryImageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor)
+                    : primaryImageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             ])
         } else {
             // Single page: fill content view

@@ -120,7 +120,42 @@ final class TextPreparationTests: XCTestCase {
         XCTAssertTrue(html.contains("<h1 id=\"toc-0\" data-source-line=\"0\">Café 👋</h1>"))
         XCTAssertTrue(html.contains("<strong>bold</strong>"))
         XCTAssertTrue(html.contains("epub-local://document/"))
-        XCTAssertEqual(prepared.chunks, ["# Café 👋\n\nA **bold** line."])
+        XCTAssertEqual(prepared.tableOfContents.first?.title, "Café 👋")
+    }
+
+    func testLargePublicationSectionsKeepCompleteMarkdownBlocks() throws {
+        let code = "```swift\n" + String(repeating: "let a = 1\n", count: 9000) + "```"
+        let source = "# Start\n\n" + code + "\n\n# End\n\nLast paragraph"
+        let prepared = try TextPreparation.prepare(source, reflow: false, markdown: true, hasFile: false)
+        let data = try Data(contentsOf: prepared.directory.url.appendingPathComponent("publication.json"))
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let sections = try XCTUnwrap(manifest["sections"] as? [[String: Any]])
+        XCTAssertGreaterThan(sections.count, 1)
+        for section in sections {
+            let href = try XCTUnwrap(section["href"] as? String)
+            let html = try String(contentsOf: prepared.directory.url.appendingPathComponent(href), encoding: .utf8)
+            XCTAssertEqual(html.components(separatedBy: "<pre").count, html.components(separatedBy: "</pre>").count)
+        }
+        XCTAssertEqual(prepared.tableOfContents.map(\.title), ["Start", "End"])
+        XCTAssertTrue(prepared.tableOfContents[1].href.hasPrefix("section-"))
+    }
+
+    func testNewlineFreeUnicodeTextIsSectionedWithoutLosingSourceOffsets() throws {
+        let source = String(repeating: "Café 👋 日本語 ", count: 30_000)
+        let prepared = try TextPreparation.prepare(source, reflow: false, markdown: false, hasFile: false)
+        let data = try Data(contentsOf: prepared.directory.url.appendingPathComponent("publication.json"))
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let sections = try XCTUnwrap(manifest["sections"] as? [[String: Any]])
+        XCTAssertGreaterThan(sections.count, 5)
+        let offsets = sections.compactMap { $0["firstOffset"] as? Int }
+        XCTAssertEqual(offsets, offsets.sorted())
+        XCTAssertGreaterThan(offsets.last ?? 0, 0)
+        for section in sections {
+            let href = try XCTUnwrap(section["href"] as? String)
+            let html = try String(contentsOf: prepared.directory.url.appendingPathComponent(href), encoding: .utf8)
+            XCTAssertFalse(html.contains("�"))
+            XCTAssertLessThan(html.utf8.count, 150_000)
+        }
     }
 
     func testCancelledPreparationDoesNotPublishOutput() async {
@@ -132,23 +167,6 @@ final class TextPreparationTests: XCTestCase {
             _ = try await worker.value
             XCTFail("Cancelled generation must not return a workspace")
         } catch { XCTAssertTrue(error is CancellationError) }
-    }
-}
-
-@MainActor
-final class TextSearchTests: XCTestCase {
-    func testUnicodeCaseMappingUsesRangesInTheOriginalText() throws {
-        let text = "İstanbul 👋 café CAFÉ Cafe\u{301}"
-        let matches = try TextSearch.matches(in: text, query: "café")
-        XCTAssertEqual(matches.count, 3)
-        XCTAssertEqual(matches.map { (text as NSString).substring(with: $0.range) }, ["café", "CAFÉ", "Cafe\u{301}"])
-        XCTAssertTrue(matches.allSatisfy { $0.fraction > 0 && $0.fraction < 1 })
-    }
-
-    func testMatchAtChunkBoundaryBelongsToCorrectChunk() throws {
-        let text = String(repeating: "line\n", count: 99) + "needle\nneedle"
-        XCTAssertEqual(try TextSearch.matches(in: text, query: "needle").map(\.chunk), [0, 1])
-        XCTAssertTrue(try TextSearch.matches(in: text, query: "").isEmpty)
     }
 }
 

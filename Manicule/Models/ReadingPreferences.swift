@@ -115,6 +115,7 @@ final class ReadingPreferences {
             theme: override.theme ?? theme,
             viewMode: override.viewMode ?? viewMode,
             twoUp: override.twoUp,
+            coverOnRight: override.coverOnRight ?? false,
             reflowText: override.reflowText ?? reflowText,
             trimWhitespace: override.trimWhitespace ?? trimWhitespace,
             textAlign: override.textAlign ?? textAlign
@@ -196,13 +197,17 @@ final class ReadingPreferences {
         }
     }
 
-    /// Sets the viewMode and twoUp preference together. Used by all four readers'
+    /// Sets the viewMode and twoUp preference together. Used by the readers'
     /// `select{Automatic,SinglePage,TwoPage,Scrolling}` methods so the boilerplate
     /// of building per-book overrides vs. updating globals lives in one place.
-    func setViewMode(_ mode: ViewMode, twoUp: Bool?, for fileHash: String?) {
+    func setViewMode(_ mode: ViewMode, twoUp: Bool?, coverOnRight: Bool? = nil, for fileHash: String?) {
         updatePreference(
             for: fileHash,
-            apply: { $0.viewMode = mode; $0.twoUp = twoUp },
+            apply: {
+                $0.viewMode = mode
+                $0.twoUp = twoUp
+                if let coverOnRight { $0.coverOnRight = coverOnRight }
+            },
             applyGlobal: { self.viewMode = mode }
         )
     }
@@ -355,39 +360,12 @@ struct EffectivePreferences: Sendable {
     let theme: ReaderTheme
     let viewMode: ViewMode
     let twoUp: Bool?       // nil = use orientation default, true/false = explicit
+    var coverOnRight: Bool = false
     let reflowText: Bool
     let trimWhitespace: Bool
     let textAlign: TextAlignment
 
-    /// Generates CSS for injection into WKWebView text content.
-    /// Uses one-up margins (scroll mode is single-column).
-    var cssString: String {
-        var css = """
-        body {
-            font-family: \(fontFamily.cssFontStack) !important;
-            font-size: \(fontSize)px !important;
-            line-height: \(lineSpacing) !important;
-            padding: \(marginsOneUp.topBottom)px \(marginsOneUp.leftRight)px !important;
-        """
-        if textAlign == .justified {
-            css += "\n    text-align: justify !important;"
-        } else {
-            css += "\n    text-align: start !important;"
-        }
-        if let bgColor = theme.cssBackground {
-            css += "\n    background-color: \(bgColor) !important;"
-        }
-        if let textColor = theme.cssForeground {
-            css += "\n    color: \(textColor) !important;"
-        }
-        css += "\n}"
-        if let accentColor = theme.cssAccent {
-            css += "\na { color: \(accentColor) !important; }"
-        }
-        return css
-    }
-
-    /// Generates CSS for foliate-js setStyles() injection into ePub content iframes.
+    /// Shared typography and theme rules for all flowing publication frames.
     var foliateCSS: String {
         var css = """
         @namespace epub "http://www.idpf.org/2007/ops";
@@ -401,7 +379,7 @@ struct EffectivePreferences: Sendable {
         css += """
 
         }
-        p, li, blockquote, dd, div, span, h1, h2, h3, h4, h5, h6 {
+        html, body, p, li, blockquote, dd, div {
         """
         // Explicit font choice: override with !important
         if !fontFamily.respectsDocumentFont {
@@ -420,6 +398,9 @@ struct EffectivePreferences: Sendable {
         css += """
 
         }
+        /* Inline emphasis and heading spans inherit their surrounding size. */
+        span { font-size: inherit !important; line-height: inherit !important; }
+        h1, h2, h3, h4, h5, h6 { line-height: \(lineSpacing) !important; }
         sup, sub {
             font-size: 0.75em !important;
             line-height: 0 !important;
@@ -431,6 +412,10 @@ struct EffectivePreferences: Sendable {
         sup, sup * { vertical-align: super !important; }
         sub, sub * { vertical-align: sub !important; }
         """
+
+        if !fontFamily.respectsDocumentFont {
+            css += "\nh1, h2, h3, h4, h5, h6, span { font-family: \(fontFamily.cssFontStack) !important; }"
+        }
 
         if let bgColor = theme.cssBackground, let textColor = theme.cssForeground {
             // Override colors on html, body, and all common text elements.
@@ -504,6 +489,7 @@ struct BookOverride: Codable, Sendable {
     var theme: ReaderTheme?
     var viewMode: ViewMode?
     var twoUp: Bool?
+    var coverOnRight: Bool?
     var reflowText: Bool?
     var trimWhitespace: Bool?
     var textAlign: TextAlignment?
@@ -525,13 +511,13 @@ struct BookOverride: Codable, Sendable {
     var isEmpty: Bool {
         fontFamily == nil && fontSize == nil && lineSpacing == nil
             && marginsOneUp == nil && marginsTwoUp == nil && theme == nil
-            && viewMode == nil && twoUp == nil && reflowText == nil
+            && viewMode == nil && twoUp == nil && coverOnRight == nil && reflowText == nil
             && trimWhitespace == nil && textAlign == nil
     }
 
     init(fontFamily: FontFamily? = nil, fontSize: Double? = nil, lineSpacing: Double? = nil,
          marginsOneUp: MarginSettings? = nil, marginsTwoUp: MarginSettings? = nil,
-         theme: ReaderTheme? = nil, viewMode: ViewMode? = nil, twoUp: Bool? = nil,
+         theme: ReaderTheme? = nil, viewMode: ViewMode? = nil, twoUp: Bool? = nil, coverOnRight: Bool? = nil,
          reflowText: Bool? = nil, trimWhitespace: Bool? = nil, textAlign: TextAlignment? = nil,
          lastUsed: Date? = nil, modifiedAt: Date? = nil) {
         self.fontFamily = fontFamily
@@ -542,6 +528,7 @@ struct BookOverride: Codable, Sendable {
         self.theme = theme
         self.viewMode = viewMode
         self.twoUp = twoUp
+        self.coverOnRight = coverOnRight
         self.reflowText = reflowText
         self.trimWhitespace = trimWhitespace
         self.textAlign = textAlign
@@ -557,6 +544,7 @@ struct BookOverride: Codable, Sendable {
         theme = try container.decodeIfPresent(ReaderTheme.self, forKey: .theme)
         viewMode = try container.decodeIfPresent(ViewMode.self, forKey: .viewMode)
         twoUp = try container.decodeIfPresent(Bool.self, forKey: .twoUp)
+        coverOnRight = try container.decodeIfPresent(Bool.self, forKey: .coverOnRight)
         reflowText = try container.decodeIfPresent(Bool.self, forKey: .reflowText)
         trimWhitespace = try container.decodeIfPresent(Bool.self, forKey: .trimWhitespace)
         textAlign = try container.decodeIfPresent(TextAlignment.self, forKey: .textAlign)
@@ -576,7 +564,7 @@ struct BookOverride: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case fontFamily, fontSize, lineSpacing, marginsOneUp, marginsTwoUp
-        case theme, viewMode, twoUp, reflowText, trimWhitespace, textAlign, lastUsed, modifiedAt
+        case theme, viewMode, twoUp, coverOnRight, reflowText, trimWhitespace, textAlign, lastUsed, modifiedAt
         case horizontalMargin // legacy key for backward compat decoding only
     }
 
@@ -590,6 +578,7 @@ struct BookOverride: Codable, Sendable {
         try container.encodeIfPresent(theme, forKey: .theme)
         try container.encodeIfPresent(viewMode, forKey: .viewMode)
         try container.encodeIfPresent(twoUp, forKey: .twoUp)
+        try container.encodeIfPresent(coverOnRight, forKey: .coverOnRight)
         try container.encodeIfPresent(reflowText, forKey: .reflowText)
         try container.encodeIfPresent(trimWhitespace, forKey: .trimWhitespace)
         try container.encodeIfPresent(textAlign, forKey: .textAlign)

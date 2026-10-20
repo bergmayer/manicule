@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        C1091C02000000000000000D /* FacingPageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1091C02000000000000000E; };
 		C0981C010000000000000001 /* AppIconStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0981C010000000000000002 /* AppIconStoreTests.swift */; };
 		22797AFC8D25F9D60F3E3961 /* FileHasherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78E65922917E96164B83722E /* FileHasherTests.swift */; };
 		29887A94C3FC924B8136E852 /* DocumentContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8001A0F8ECFD35852D302D8 /* DocumentContentTests.swift */; };
@@ -67,6 +68,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+        C1091C02000000000000000E /* FacingPageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacingPageUITests.swift; sourceTree = "<group>"; };
 		C0981C010000000000000002 /* AppIconStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconStoreTests.swift; sourceTree = "<group>"; };
 		0A447A41AF71C2B803B61F2C /* RelocateEventTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RelocateEventTests.swift; path = "ManiculeTests/RelocateEventTests.swift"; sourceTree = "<group>"; };
 		311F13BC2F4DE7BF007FDDEA /* Manicule.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Manicule.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -241,7 +243,7 @@
 			path = "ManiculeTests";
 			sourceTree = "<group>";
 		};
-		C1091C020000000000000003 /* ManiculeUITests */ = {isa = PBXGroup; children = (C1091C020000000000000004 /* AppIconUITests.swift */,); path = ManiculeUITests; sourceTree = "<group>"; };
+		C1091C020000000000000003 /* ManiculeUITests */ = {isa = PBXGroup; children = (C1091C020000000000000004 /* AppIconUITests.swift */, C1091C02000000000000000E /* FacingPageUITests.swift */,); path = ManiculeUITests; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -433,7 +435,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		C1091C020000000000000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C1091C020000000000000005,); runOnlyForDeploymentPostprocessing = 0; };
+		C1091C020000000000000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C1091C020000000000000005, C1091C02000000000000000D,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */

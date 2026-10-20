@@ -1,4 +1,6 @@
 import './view.js'
+import { SectionProgress } from './progress.js'
+import { makeTextBook, captureSourceAnchor } from './text-book.js'
 
 const post = msg => window.webkit.messageHandlers.bridge.postMessage(msg)
 
@@ -243,7 +245,18 @@ window.addEventListener('resize', () => {
 
 // --- Event forwarding ---
 
-view.addEventListener('relocate', ({ detail }) => {
+let initializing = true
+let lastRelocation = null
+// Match Foliate's content-based locations, independent of typography or viewport.
+// Cache by publication so page entry does not rescan the spine on each keystroke.
+const bookProgress = new WeakMap()
+function estimatedProgress() {
+    const book = view.book
+    if (!bookProgress.has(book)) bookProgress.set(book, new SectionProgress(book.sections, 1500, 1600))
+    return bookProgress.get(book)
+}
+
+function reportRelocation(detail) {
     const { fraction, tocItem, pageItem, cfi, location, section, range } = detail
     const renderer = view.renderer
     const atStart = renderer?.atStart ?? false
@@ -258,11 +271,18 @@ view.addEventListener('relocate', ({ detail }) => {
         tocItem: tocItem ? { label: tocItem.label, href: tocItem.href } : null,
         pageItem: pageItem ? { label: pageItem.label } : null,
         location: location ?? null,
+        bookPagesEstimated: !view.isFixedLayout,
+        bookPage: view.isFixedLayout ? Math.max(0, renderer.index)
+            : Math.max(0, Math.min((location?.total || 1) - 1, location?.current || 0)),
+        bookPageEnd: view.isFixedLayout ? Math.max(0, renderer.index)
+            : Math.max(0, Math.min((location?.total || 1) - 1, location?.next || 0)),
+        bookPages: view.isFixedLayout ? view.book.sections.length : Math.max(1, location?.total || 1),
         section: section ?? null,
         page,
         pages,
         atStart,
         atEnd,
+        textAnchor: view.book?.textAnchorTarget ? captureSourceAnchor(range) : null,
     })
 
     // Update the center viewport range for resize stability
@@ -291,7 +311,13 @@ view.addEventListener('relocate', ({ detail }) => {
             }
         }
     }
+}
+
+view.addEventListener('relocate', ({ detail }) => {
+    lastRelocation = detail
+    if (!initializing) reportRelocation(detail)
 })
+
 
 view.addEventListener('load', ({ detail }) => {
     currentSectionDoc = detail.doc || null
@@ -1044,7 +1070,10 @@ function scrollToReadAloudOffset(offset) {
 window.bridge = {
     async open(epubURL) {
         try {
-            await view.open(epubURL)
+            initializing = true
+            lastRelocation = null
+            const book = epubURL.endsWith('/publication.json') ? await makeTextBook(epubURL) : epubURL
+            await view.open(book)
             const metadata = view.book?.metadata ?? {}
             const toc = view.book?.toc ?? []
             post({
@@ -1065,12 +1094,20 @@ window.bridge = {
 
     async init(options) {
         try {
-            await view.init(options ?? {})
             if (view.renderer) {
                 view.renderer.setAttribute('animated', '')
                 view.renderer.setAttribute('max-block-size', '10000px')
                 applyResolvedColumnCount()
             }
+            if (options?.textAnchor && view.book?.textAnchorTarget) {
+                await view.renderer.goTo(await view.book.textAnchorTarget(options.textAnchor))
+            } else if (Number.isFinite(options?.fraction)) {
+                await view.goToFraction(Math.max(0, Math.min(1, options.fraction)))
+            } else {
+                await view.init(options ?? {})
+            }
+            initializing = false
+            if (lastRelocation) reportRelocation(lastRelocation)
         } catch (e) {
             console.error('bridge.init failed:', e)
             post({ type: 'error', message: 'init: ' + (e.message ?? String(e)) })
@@ -1104,12 +1141,30 @@ window.bridge = {
         }
     },
 
+    async goToPage(page) {
+        if (!Number.isSafeInteger(page) || page < 0) return
+        await enqueueNavigation(async () => {
+            if (view.isFixedLayout) {
+                if (page < view.book.sections.length) await view.goTo(page)
+            } else {
+                const progress = estimatedProgress()
+                if (progress.sizeTotal > 0 && page < Math.ceil(progress.sizeTotal / progress.sizePerLoc)) {
+                    await view.goToFraction(page * progress.sizePerLoc / progress.sizeTotal)
+                }
+            }
+        }, 'go to page')
+    },
     async goToFraction(f) {
         try {
             await enqueueNavigation(() => view.goToFraction(f), 'go to fraction')
         } catch (e) {
             console.error('goToFraction failed:', e)
         }
+    },
+
+    async goToTextAnchor(anchor) {
+        if (!view.book?.textAnchorTarget) return
+        await enqueueNavigation(async () => view.renderer.goTo(await view.book.textAnchorTarget(anchor)), 'restore source passage')
     },
 
     setFlow(mode) {

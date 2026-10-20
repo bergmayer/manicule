@@ -16,6 +16,9 @@ struct ComicReaderView: View {
     @State private var showBookmarks: Bool = false
     @State private var showSettings: Bool = false
     @State private var showThumbnails: Bool = false
+    private var coverOnRight: Bool { readingPrefs.effective(for: fileHash).coverOnRight }
+    @State private var pageEntryTwoUp: Bool?
+    @State private var pairingAnchorPage: Int?
     private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
     @State private var viewWidth: CGFloat = 0
     @State private var viewHeight: CGFloat = 0
@@ -48,7 +51,7 @@ struct ComicReaderView: View {
 
     private var effectiveTwoUp: Bool {
         guard isPaginated else { return false }
-        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
+        return pageEntryTwoUp ?? twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
     }
 
     var body: some View {
@@ -65,17 +68,27 @@ struct ComicReaderView: View {
                 clearComicSearch()
             }
             .onChange(of: currentPage) { _, newPage in
+                if let anchor = pairingAnchorPage,
+                   PageNavigation.normalizedStart(current: anchor, pageCount: archive.pageCount,
+                       twoUp: effectiveTwoUp, coverOnRight: coverOnRight) != newPage {
+                    pairingAnchorPage = nil
+                }
                 let normalized = PageNavigation.normalizedStart(
-                    current: newPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp)
+                    current: newPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
                 if normalized != newPage {
                     currentPage = normalized
                     return
                 }
                 autoSavePosition()
             }
+            .onChange(of: coverOnRight) { _, _ in
+                currentPage = PageNavigation.normalizedStart(
+                    current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp,
+                    coverOnRight: coverOnRight)
+            }
             .onChange(of: effectiveTwoUp) { _, isTwoUp in
                 currentPage = PageNavigation.normalizedStart(
-                    current: currentPage, pageCount: archive.pageCount, twoUp: isTwoUp)
+                    current: currentPage, pageCount: archive.pageCount, twoUp: isTwoUp, coverOnRight: coverOnRight)
             }
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
@@ -286,7 +299,7 @@ struct ComicReaderView: View {
         .padding(.horizontal)
         .padding(.vertical, 20)
         .background {
-            Rectangle().fill(.bar).ignoresSafeArea(edges: .top)
+            ReaderChromeBackground().ignoresSafeArea(edges: .top)
         }
     }
     #endif
@@ -295,7 +308,7 @@ struct ComicReaderView: View {
         PageNavigation.normalizedStart(
             current: sliderDragging ? sliderPageIndex : currentPage,
             pageCount: archive.pageCount,
-            twoUp: effectiveTwoUp
+            twoUp: effectiveTwoUp, coverOnRight: coverOnRight
         )
     }
 
@@ -338,8 +351,17 @@ struct ComicReaderView: View {
                 }
             }
             HStack {
-                Text(ReaderHelpers.pageLabel(current: displayedComicPage, total: archive.pageCount, twoUp: effectiveTwoUp))
+                Text(ReaderHelpers.pageLabel(current: displayedComicPage, total: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight))
                     .font(.caption).monospacedDigit()
+                ReaderPageField(page: displayedComicPage + 1, pageCount: archive.pageCount, goToPage: { index in
+                    sliderDragging = false
+                    currentPage = PageNavigation.normalizedStart(
+                        current: index, pageCount: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
+                }, onEditingChanged: { editing in
+                    // Keep the page pairing stable until the keyboard finishes closing.
+                    let pairing = editing ? effectiveTwoUp : nil
+                    DispatchQueue.main.async { pageEntryTwoUp = pairing }
+                })
                 Spacer()
                 let pct = archive.pageCount > 1 ? Int(Double(displayedComicPage) / Double(archive.pageCount - 1) * 100) : 0
                 Text("\(pct)%").font(.caption).monospacedDigit()
@@ -347,7 +369,7 @@ struct ComicReaderView: View {
             .padding(.horizontal)
             .padding(.vertical, 6)
         }
-        .background(.bar)
+        .background { ReaderChromeBackground().ignoresSafeArea(edges: .bottom) }
     }
 
     // MARK: - Paginated Content
@@ -359,6 +381,7 @@ struct ComicReaderView: View {
             pages: archive.pages,
             currentPage: $currentPage,
             twoUp: effectiveTwoUp,
+            coverOnRight: coverOnRight,
             readingDirection: readingDirection,
             trimWhitespace: trimWhitespace,
             onToggleChrome: { showChrome.toggle() }
@@ -466,31 +489,32 @@ struct ComicReaderView: View {
     /// Two-page spread view, respecting reading direction.
     @ViewBuilder
     private var twoPageSpread: some View {
-        let hasSecondPage = currentPage + 1 < archive.pageCount
+        let isCover = coverOnRight && currentPage == 0
+        let second = !isCover && currentPage + 1 < archive.pageCount ? currentPage + 1 : nil
+        let leading: Int? = isCover ? nil : currentPage
+        let trailing: Int? = isCover ? currentPage : second
+        let left = readingDirection == .leftToRight ? leading : trailing
+        let right = readingDirection == .leftToRight ? trailing : leading
         let m = readingPrefs.effective(for: fileHash).marginsTwoUp
 
         HStack(spacing: m.leftRight) {
-            if readingDirection == .leftToRight {
-                ComicPageView(imageURL: archive.pages[currentPage], trimWhitespace: trimWhitespace)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .id("left-\(currentPage)")
-                if hasSecondPage {
-                    ComicPageView(imageURL: archive.pages[currentPage + 1], trimWhitespace: trimWhitespace)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .id("right-\(currentPage + 1)")
-                }
-            } else {
-                if hasSecondPage {
-                    ComicPageView(imageURL: archive.pages[currentPage + 1], trimWhitespace: trimWhitespace)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .id("left-\(currentPage + 1)")
-                }
-                ComicPageView(imageURL: archive.pages[currentPage], trimWhitespace: trimWhitespace)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .id("right-\(currentPage)")
-            }
+            spreadPage(left)
+            spreadPage(right)
         }
         .padding(.horizontal, m.leftRight)
+    }
+
+    @ViewBuilder
+    private func spreadPage(_ index: Int?) -> some View {
+        Group {
+            if let index {
+                ComicPageView(imageURL: archive.pages[index], trimWhitespace: trimWhitespace)
+                    .id(index)
+            } else {
+                Color.clear
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var bookmarkedComicPages: Set<Int> {
@@ -505,13 +529,13 @@ struct ComicReaderView: View {
     }
 
     private var pageLabel: String {
-        ReaderHelpers.pageLabel(current: currentPage, total: archive.pageCount, twoUp: effectiveTwoUp)
+        ReaderHelpers.pageLabel(current: currentPage, total: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
     }
 
     private func previousPage(animated: Bool = false) {
         zoomScale = 1.0
         let newPage = PageNavigation.previous(
-            current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp)
+            current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
         guard newPage != currentPage else { return }
         navigatingForward = false
         if animated {
@@ -524,7 +548,7 @@ struct ComicReaderView: View {
     private func nextPage(animated: Bool = false) {
         zoomScale = 1.0
         let newPage = PageNavigation.next(
-            current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp)
+            current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight)
         guard newPage != currentPage else { return }
         navigatingForward = true
         if animated {
@@ -629,10 +653,12 @@ struct ComicReaderView: View {
     }
 
     private func selectTwoPage() {
-
+        let anchor = pairingAnchorPage ?? currentPage
+        let shifted = effectiveTwoUp ? !coverOnRight : coverOnRight
+        pairingAnchorPage = anchor
+        readingPrefs.setViewMode(.paginated, twoUp: true, coverOnRight: shifted, for: fileHash)
         currentPage = PageNavigation.normalizedStart(
-            current: currentPage, pageCount: archive.pageCount, twoUp: true)
-        readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
+            current: anchor, pageCount: archive.pageCount, twoUp: true, coverOnRight: shifted)
     }
 
     private func selectScrolling() {
@@ -659,13 +685,13 @@ struct ComicReaderView: View {
                 Label("Previous Page", systemImage: "chevron.left")
             }
             .disabled(!PageNavigation.canGoPrevious(
-                current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp))
+                current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight))
 
             Button(action: { nextPage() }) {
                 Label("Next Page", systemImage: "chevron.right")
             }
             .disabled(!PageNavigation.canGoNext(
-                current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp))
+                current: currentPage, pageCount: archive.pageCount, twoUp: effectiveTwoUp, coverOnRight: coverOnRight))
         }
 
         ToolbarItem(placement: .automatic) {

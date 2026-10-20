@@ -9,6 +9,136 @@ import ImageIO
 @MainActor
 final class DocumentContentTests: XCTestCase {
 
+    #if !os(macOS)
+    func testBookPairingLeavesCoverOnRightThenShowsPagesTwoAndThree() throws {
+        let document = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+        for index in 1..<4 {
+            document.insert(try XCTUnwrap(PDFDocument(data: Self.minimalPDF)?.page(at: 0)), at: index)
+        }
+        for index in [0, 1] {
+            let configuration = PDFViewRepresentable(
+                pdfDocument: document, currentPageIndex: .constant(index), twoUp: true, coverOnRight: true)
+            let controller = PDFSpreadViewController(pageIndex: index, configuration: configuration)
+            controller.loadViewIfNeeded()
+            controller.view.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+            controller.view.layoutIfNeeded()
+            let pdf = try XCTUnwrap(controller.pdfView)
+            func rect(_ index: Int) throws -> CGRect {
+                let page = try XCTUnwrap(document.page(at: index))
+                return pdf.convert(pdf.convert(page.bounds(for: .cropBox), from: page), to: controller.view)
+            }
+            if index == 0 {
+                XCTAssertGreaterThanOrEqual(try rect(0).minX, controller.view.bounds.midX - 1)
+            } else {
+                XCTAssertLessThan(try rect(1).midX, controller.view.bounds.midX)
+                XCTAssertGreaterThan(try rect(2).midX, controller.view.bounds.midX)
+            }
+        }
+    }
+
+    func testFacingSpreadDefersPanningToPagerAtFitAndKeepsPinchZoom() throws {
+        let document = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+        let configuration = PDFViewRepresentable(
+            pdfDocument: document, currentPageIndex: .constant(0), twoUp: true)
+        let controller = PDFSpreadViewController(pageIndex: 0, configuration: configuration)
+        controller.loadViewIfNeeded()
+        let view = try XCTUnwrap(controller.pdfView)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        controller.view.layoutIfNeeded()
+        view.layoutIfNeeded()
+        let scroll = try XCTUnwrap(scrollView(in: view))
+        XCTAssertFalse(scroll.isScrollEnabled)
+        XCTAssertTrue(try XCTUnwrap(scroll.pinchGestureRecognizer).isEnabled)
+        UIView.performWithoutAnimation { view.toggleZoom() }
+        XCTAssertTrue(scroll.isScrollEnabled)
+        // A parent update must preserve an in-progress zoom on the existing spread.
+        controller.update(configuration)
+        XCTAssertEqual(view.scaleFactor / view.scaleFactorForSizeToFit, 2.5, accuracy: 0.01)
+        UIView.performWithoutAnimation { view.toggleZoom() }
+        XCTAssertFalse(scroll.isScrollEnabled)
+        XCTAssertEqual(controller.pageIndex, 0)
+    }
+
+    private func scrollView(in view: UIView) -> UIScrollView? {
+        if let scroll = view as? UIScrollView { return scroll }
+        return view.subviews.lazy.compactMap { self.scrollView(in: $0) }.first
+    }
+
+    func testPDFZoomRequestedBeforeLayoutAppliesWhenSpreadBecomesVisible() throws {
+        let view = TouchReaderPDFView()
+        view.document = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+        view.displayMode = .twoUp
+        view.applyRequestedZoom(2.5)
+        view.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        view.layoutIfNeeded()
+        XCTAssertEqual(view.scaleFactor / view.scaleFactorForSizeToFit, 2.5, accuracy: 0.01)
+    }
+
+    func testPDFZoomRemainsNearFitAndDoubleTapTogglesBack() throws {
+        let view = TouchReaderPDFView(frame: CGRect(x: 0, y: 0, width: 768, height: 1024))
+        view.document = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+        view.displayMode = .singlePage
+        view.autoScales = true
+        view.layoutIfNeeded()
+        view.updateZoomLimits()
+        let fit = view.scaleFactorForSizeToFit
+        XCTAssertGreaterThan(fit, 0)
+        view.scaleFactor = fit * 0.1
+        XCTAssertEqual(view.scaleFactor, fit * 0.95, accuracy: 0.01)
+        UIView.performWithoutAnimation { view.toggleZoom() }
+        XCTAssertEqual(view.scaleFactor, fit * 2.5, accuracy: 0.01)
+        UIView.performWithoutAnimation { view.toggleZoom() }
+        XCTAssertEqual(view.scaleFactor, fit, accuracy: 0.01)
+        view.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        view.layoutIfNeeded()
+        view.updateZoomLimits()
+        XCTAssertEqual(view.minScaleFactor, view.scaleFactorForSizeToFit * 0.95, accuracy: 0.01)
+        view.applyRequestedZoom(0.1)
+        XCTAssertEqual(view.scaleFactor, view.minScaleFactor, accuracy: 0.01)
+        // Unrelated SwiftUI updates must preserve a user's pinch or double-tap.
+        view.toggleZoom()
+        let zoomed = view.scaleFactor
+        view.applyRequestedZoom(0.1)
+        XCTAssertEqual(view.scaleFactor, zoomed, accuracy: 0.01)
+    }
+    func testPDFZoomLimitsInPagingSpreadAndContinuousLayouts() async throws {
+        for mode in [PDFDisplayMode.singlePage, .twoUp, .singlePageContinuous] {
+            let view = TouchReaderPDFView(frame: CGRect(x: 0, y: 0, width: 1024, height: 768))
+            let document = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+            let secondDocument = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+            document.insert(try XCTUnwrap(secondDocument.page(at: 0)), at: 1)
+            view.document = document
+            view.displayMode = mode
+            if mode == .singlePage { view.usePageViewController(true) }
+            view.autoScales = true
+            let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+            let window = UIWindow(windowScene: scene)
+            let controller = UIViewController()
+            controller.view = view
+            window.rootViewController = controller
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true }
+            // PDFKit's page controller creates its visible page asynchronously.
+            for _ in 0..<100 {
+                window.layoutIfNeeded()
+                view.layoutIfNeeded()
+                if view.scaleFactor > 0 { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            view.layoutIfNeeded()
+            view.updateZoomLimits()
+            let fit = view.scaleFactorForSizeToFit
+            XCTAssertGreaterThan(fit, 0)
+            view.scaleFactor = fit * 0.1
+            XCTAssertEqual(view.scaleFactor, fit * 0.95, accuracy: 0.01)
+            view.go(to: try XCTUnwrap(document.page(at: 1)))
+            view.layoutIfNeeded()
+            view.updateZoomLimits()
+            XCTAssertEqual(view.minScaleFactor, view.scaleFactorForSizeToFit * 0.95, accuracy: 0.01)
+        }
+    }
+    #endif
+
     func testPDFRendererProducesThumbnailFromSnapshotAndRejectsInvalidPages() async throws {
         let renderer = PDFPageRenderer(data: Self.minimalPDF, fileHash: "test-pdf")
         let rendered = await renderer.thumbnail(at: 0, width: 160)
@@ -296,7 +426,7 @@ final class DocumentContentTests: XCTestCase {
     }()
 
     /// Creates a minimal valid ePub (ZIP with container.xml, content.opf, and one XHTML chapter).
-    static func minimalEPub() throws -> Data {
+    static func minimalEPub(chapterText: String = "Hello, World!", chapterCount: Int = 1) throws -> Data {
         let archive = try Archive(accessMode: .create)
 
         try archive.addEntry(with: "mimetype",
@@ -323,10 +453,10 @@ final class DocumentContentTests: XCTestCase {
             <dc:language>en</dc:language>
           </metadata>
           <manifest>
-            <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+            \((1...chapterCount).map { "<item id=\"ch\($0)\" href=\"chapter\($0).xhtml\" media-type=\"application/xhtml+xml\"/>" }.joined())
           </manifest>
           <spine>
-            <itemref idref="ch1"/>
+            \((1...chapterCount).map { "<itemref idref=\"ch\($0)\"/>" }.joined())
           </spine>
         </package>
         """
@@ -336,10 +466,12 @@ final class DocumentContentTests: XCTestCase {
         <?xml version="1.0" encoding="UTF-8"?>
         <html xmlns="http://www.w3.org/1999/xhtml">
         <head><title>Chapter 1</title></head>
-        <body><p>Hello, World!</p></body>
+        <body><p>\(chapterText)</p></body>
         </html>
         """
-        try addTextEntry(to: archive, path: "OEBPS/chapter1.xhtml", content: xhtml)
+        for chapter in 1...chapterCount {
+            try addTextEntry(to: archive, path: "OEBPS/chapter\(chapter).xhtml", content: xhtml)
+        }
 
         return archive.data!
     }

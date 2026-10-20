@@ -151,3 +151,36 @@ A separate **Manicule UI Tests** scheme and one focused UI test were added witho
 Lizard 1.24.0, with the same Swift function scan before and after, measures `AppIconStore.change` at CCN 3 → 2; the new `changeAppIconAfterSettingsDismissal` measures 3. Error handling moved to its presenting window, so this is not a claim that total decision complexity decreased. The principal improvement is a sequential presentation lifetime and explicit error ownership. The scan does not fully model SwiftUI result-builder closures.
 
 The four focused icon-state unit tests also passed: serialized requests, success-only selection changes, failure propagation with retry, and primary-icon/no-op/unsupported behavior. No unrelated unit suites were repeated. Scoped `git diff --check` passes. After extracting the result summaries, the temporary simulator, DerivedData, app binaries, and result bundles were removed. Only source/tests and text/image diagnostic evidence remain in this increment; no archive or device installation was created.
+
+## Shared Foliate reader and engineering review (October 17, 2026)
+
+EPUB, plain text, and Markdown now use `FlowingReaderView` and the same Foliate layout, settings, search, and narration bridge. `FlowingContent` distinguishes publication preparation. `TextPreparation` writes a small JSON manifest and complete HTML sections; `text-book.js` supplies those sections directly to Foliate's book interface. No synthetic EPUB archive or new dependency is required. PDFKit and native comic rendering retain their existing paths.
+
+The review covered the changed reader, preparation, navigation, persistence integration, resource routing, and shared typography. The changes address these findings:
+
+- **Duplicated behavior and state:** deleted the separate text reader UI, native text-chunk display path, custom text pagination JavaScript, text-only search implementation, alternate CSS generator, and obsolete bridge fields and methods. One reader owns shared controls and state. The app source falls from 21,269 to 19,111 physical lines across Swift, JavaScript, and HTML, including vendored JavaScript but excluding downloaded packages, tests, and Quick Look. This is a maintenance-size measurement, not a complexity or speed score.
+- **Large-file layout:** generated text targets sections of about 64 KiB of HTML at complete block boundaries. Long raw lines are sliced with UTF-16 source offsets. Lists, tables, and fenced Markdown code remain complete even when an individual block exceeds the target. Foliate renders one section at a time. There is no whole-publication DOM cache; restoration may inspect additional sections one at a time when reflow moved the quoted passage. Generation remains off the main actor, checks cancellation between work units, and publishes only successfully written files under a temporary-directory lease.
+- **Position compatibility:** text still saves source-line/passage anchors and reads legacy fractional positions. It does not persist Foliate CFIs for generated text, whose DOM changes between raw/rendered Markdown and reflow settings. Source offsets disambiguate slices of newline-free files. Repeated quotes prefer the occurrence nearest the saved offset to avoid cumulative backward drift. EPUB continues to use its existing CFI representation.
+- **Resource ownership and origin:** generated publications share the trusted reader host's custom-scheme origin. Their route resolves within the active leased directory, using the existing traversal and symlink checks. Relative Markdown images retain the separately bounded source-document directory route. Generated documents retain a content security policy disabling publication scripts. Outstanding native resource reads retain their routing snapshot and lease.
+- **Bridge arguments and lifecycle:** file selection, CSS, search strings, navigation targets, and source anchors pass as structured WebKit arguments. They do not require hand-escaped executable JavaScript. Completions from replaced or closed publications are ignored. Layout options are applied before initial restoration, and initial relocation messages are withheld until the requested navigation finishes.
+- **Persistence traffic:** automatic positions are debounced for one second during navigation and flushed when the reader disappears. Existing reading-session revocation and cloud merge behavior remain in the persistence layer.
+- **Uniform typography without flattening structure:** one CSS generator controls font, line height, justification, and theme across flowing formats. Headings keep relative sizes; inline spans inherit surrounding sizes. Foliate owns one/two-page margins, resizing, scrolling, and pagination. EPUB chapter controls are omitted for generated text sections.
+
+Validation uses actual WebKit/Foliate frames through the native scheme handler. Tests cover visible passage restoration across raw/rendered Markdown, one/two-page and scrolling layouts, reflow, newline-free Unicode offsets, legacy percentages, typography, headings, themes, margins, search, narration text extraction, empty text, EPUB rendering and invalid-CFI fallback, cancellation, complete Markdown blocks, and resource traversal. The iPhone geometry assertion waits for the requested passage to become visible after asynchronous WebKit layout; an immediate first-relocation assertion was premature. It still fails if that passage does not become visible within eight seconds.
+
+A 3,168,888-byte text fixture verifies multiple sections, one active rendered section, and navigation to 90 percent. In one macOS Debug run, preparation took 0.188 seconds and initial load plus navigation took 0.278 seconds. These are local observations, not comparative benchmarks or peak-memory measurements. Manual macOS checks used a disposable Markdown fixture to inspect live font size, line spacing, margins, justification, two-page layout, and repeated raw/rendered switching. Original books were not used for manual checks.
+
+Remaining limits: generated text now uses Foliate's section-based scrolling and section navigation, including internal boundaries in long documents. A single very large Markdown block can still exceed the section target. EPUB is still parsed/extracted by Swift and separately opened from its archive by Foliate; removing that duplication is a separate change. Physical-device audio, real cross-device iCloud delivery, and visionOS runtime interaction were not verified. No dependency rewrite, commit, installation over the user's existing app, or distribution was performed.
+
+Final checks:
+
+| Check | Result |
+| --- | --- |
+| macOS Debug unit and integration suite | 119 tests passed |
+| iPhone 17 Pro simulator, iOS 27.0, unit and integration suite | 141 tests passed |
+| macOS Release app and Quick Look build | Passed |
+| iOS simulator app and Quick Look build | Passed |
+| visionOS simulator app and Quick Look build | Passed; no visionOS runtime was available for interaction |
+| JavaScript module syntax and `git diff --check` | Passed |
+
+The disposable iPhone simulator was removed after validation. Build products and test results are under `/tmp/manicule-foliate-{build,ios,vision}`; logs are `/tmp/manicule-foliate-{finaltest,iostest,release,ios,vision}.log`. The existing installed macOS app was not replaced.

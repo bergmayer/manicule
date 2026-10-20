@@ -7,10 +7,10 @@ private struct MarginPair: Equatable {
     let twoUp: MarginSettings
 }
 
-/// Displays an ePub book using foliate-js web components with built-in pagination,
-/// touch handling, and CFI-based navigation.
-struct EPubReaderView: View {
-    let book: EPubBook
+/// EPUB, plain text, and Markdown share Foliate layout, controls, search,
+/// and narration. Format preparation and source anchors stay outside the engine.
+struct FlowingReaderView: View {
+    let source: FlowingContent
     let fileURL: URL?
     let rawData: Data
     @Environment(\.readingSession) private var readingSession
@@ -19,14 +19,19 @@ struct EPubReaderView: View {
     var onClose: (() -> Void)?
 
     @State private var currentFraction: Double = 0.0
+    @State private var currentTextAnchor: TextAnchor?
+    @State private var hasLocation = false
+    @State private var restorePosition: ReadingPosition?
+    @State private var renderMarkdown = true
+    @State private var textTableOfContents: [EPubBook.TOCEntry] = []
     @State private var currentCFI: String?
     @State private var currentTOCLabel: String?
     @State private var atStart: Bool = true
     @State private var atEnd: Bool = false
-    @State private var currentPage: Int = 0
-    @State private var totalPages: Int = 1
-    @State private var sectionIndex: Int = 0
-    @State private var sectionCount: Int = 1
+    @State private var bookPage: Int = 0
+    @State private var bookPageEnd: Int = 0
+    @State private var bookPages: Int = 1
+    @State private var bookPagesEstimated = true
 
     // UI state
     @State private var showTOC: Bool = false
@@ -34,15 +39,33 @@ struct EPubReaderView: View {
     @State private var showSettings: Bool = false
     private var viewMode: ViewMode { readingPrefs.effective(for: fileHash).viewMode }
     private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
-    @State private var viewWidth: CGFloat = 0
-    @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
     @State private var bookDirectory: TemporaryDirectoryLease?
     @State private var bookLoadError: String?
     @State private var loadAttempt = UUID()
     @State private var positionRestoreTask: Task<Void, Never>?
-    private var bookTempURL: URL? { bookDirectory?.url.appendingPathComponent("book.epub") }
+    private var bookTempURL: URL? {
+        bookDirectory?.url.appendingPathComponent(source.text == nil ? "book.epub" : "publication.json")
+    }
+    private var title: String {
+        if case .epub(let book) = source { return book.metadata.title }
+        return fileURL?.deletingPathExtension().lastPathComponent ?? "Document"
+    }
+    private var tableOfContents: [EPubBook.TOCEntry] {
+        if case .epub(let book) = source { return book.tableOfContents }
+        return textTableOfContents
+    }
+    private var currentPosition: ReadingPosition {
+        if source.text != nil {
+            return currentTextAnchor.map { .textAnchor($0, fraction: currentFraction) }
+                ?? .textOffset(Int(min(1, max(0, currentFraction)) * 1000))
+        }
+        return .epubCFI(currentCFI ?? "", fraction: currentFraction)
+    }
+    private var preparationID: String {
+        "\(loadAttempt)-\(renderMarkdown)-\(source.text != nil && !source.isMarkdown && readingPrefs.effective(for: fileHash).reflowText)"
+    }
 
     @State private var fastScroll = FastScrollController()
 
@@ -71,11 +94,6 @@ struct EPubReaderView: View {
         viewMode == .paginated
     }
 
-    private var effectiveTwoUp: Bool {
-        guard isPaginated else { return false }
-        return twoUpOverride ?? ReaderHelpers.defaultTwoUp(viewWidth: viewWidth, viewHeight: viewHeight)
-    }
-
     /// Both margin pairs as a single Equatable value, used to drive a single
     /// onChange that re-sends to the bridge whenever either pair changes (e.g.
     /// the user moves a slider in Reading Settings).
@@ -91,18 +109,16 @@ struct EPubReaderView: View {
     }
 
     var body: some View {
-        epubLayoutWithToolbar
+        readerLayoutWithToolbar
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
                     BookmarkPickerView(fileHash: fileHash) { position in
-                        if case .epubCFI(let cfi, _) = position, !cfi.isEmpty {
-                            webViewProxy.goTo?(cfi)
-                        }
+                        navigate(to: position)
                     }
                 }
             }
             .sheet(isPresented: $showSettings) {
-                ReaderSettingsSheet(fileHash: fileHash)
+                ReaderSettingsSheet(fileHash: fileHash, showReflowOption: source.text != nil && !source.isMarkdown)
             }
             .onChange(of: readingPrefs.effective(for: fileHash).foliateCSS) { _, newCSS in
                 webViewProxy.setStyles?(newCSS)
@@ -125,10 +141,10 @@ struct EPubReaderView: View {
     }
 
     @ViewBuilder
-    private var epubLayoutWithToolbar: some View {
-        epubLayoutWithNotifications
+    private var readerLayoutWithToolbar: some View {
+        readerLayoutWithNotifications
             #if os(macOS)
-            .toolbar { epubToolbar }
+            .toolbar { readerToolbar }
             #endif
             .fullScreenToolbarAutoHide(showChrome: $showChrome)
             .task(id: showTOC) {
@@ -136,23 +152,44 @@ struct EPubReaderView: View {
                 do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
                 webViewProxy.refocus?()
             }
-            .task(id: loadAttempt) {
+            .task(id: preparationID) {
                 ReaderHelpers.migrateLegacyIdentity(data: rawData, currentHash: fileHash)
                 readingPrefs.touchLastUsed(for: fileHash)
                 wireFastScrollAnimationSuppression()
-                let bookData = rawData
-                bookDirectory = nil
+                restorePosition = hasLocation ? currentPosition
+                    : bookmarkStore.savedPosition(for: fileHash)?.position
+                        ?? bookmarkStore.bookmarks(for: fileHash).first?.position
+                hasLocation = false
                 bookLoadError = nil
                 bridgeReady = false
+                searchDebouncer.cancel()
+                searchResults = []
+                search.isSearching = false
+                webViewProxy.clearSearch?()
+                #if os(iOS) || os(visionOS)
+                readAloud.dismiss(for: narrationOwner)
+                #endif
+                let input = source
+                let bookData = rawData
+                let markdown = source.isMarkdown && renderMarkdown
+                let reflow = !source.isMarkdown && readingPrefs.effective(for: fileHash).reflowText
+                let hasFile = fileURL != nil
+                let documentTitle = title
                 do {
-                    let worker = Task.detached(priority: .utility) {
+                    let worker = Task.detached(priority: .utility) { () throws -> (TemporaryDirectoryLease, TextPreparation.Prepared?) in
                         try Task.checkCancellation()
-                        return try TemporaryDirectoryLease.writing(bookData, filename: "book.epub")
+                        if let text = input.text {
+                            let prepared = try TextPreparation.prepare(text, reflow: reflow, markdown: markdown,
+                                hasFile: hasFile, title: documentTitle, markdownSource: input.isMarkdown)
+                            return (prepared.directory, prepared)
+                        }
+                        return (try TemporaryDirectoryLease.writing(bookData, filename: "book.epub"), nil)
                     }
-                    let directory = try await withTaskCancellationHandler {
+                    let (directory, prepared) = try await withTaskCancellationHandler {
                         try await worker.value
                     } onCancel: { worker.cancel() }
                     try Task.checkCancellation()
+                    textTableOfContents = prepared?.tableOfContents ?? []
                     bookDirectory = directory
                 } catch is CancellationError {
                     // The local lease releases any completed temporary file.
@@ -161,11 +198,17 @@ struct EPubReaderView: View {
                     bookLoadError = error.localizedDescription
                 }
             }
+            .task(id: currentPosition) {
+                guard hasLocation else { return }
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                autoSavePosition()
+            }
             .onDisappear {
                 autoSavePosition()
                 searchDebouncer.cancel()
                 positionRestoreTask?.cancel()
                 webViewProxy.clearSearch?()
+                textTableOfContents = []
                 bookDirectory = nil
                 #if os(iOS) || os(visionOS)
                 readAloud.dismiss(for: narrationOwner)
@@ -174,8 +217,8 @@ struct EPubReaderView: View {
     }
 
     @ViewBuilder
-    private var epubLayoutWithNotifications: some View {
-        epubLayout
+    private var readerLayoutWithNotifications: some View {
+        readerLayout
             .readerCommands(ReaderCommandHandlers(
                 onToggleViewMode: { if isPaginated { selectScrolling() } else { selectSinglePage() } },
                 onBookmark: toggleBookmark,
@@ -198,17 +241,16 @@ struct EPubReaderView: View {
             .onReaderCommand(.toggleReadAloud, perform: toggleReadAloud)
             #endif
             .onChange(of: search.query) { _, newQuery in
-                clearEPubSearch()
-                searchDebouncer.handle(newQuery, perform: performEPubSearch, clear: clearEPubSearch)
+                clearSearch()
+                searchDebouncer.handle(newQuery, perform: performSearch, clear: clearSearch)
             }
     }
 
     @ViewBuilder
-    private var epubLayout: some View {
+    private var readerLayout: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .leading) {
-                epubContent
-                    .trackViewportSize(width: $viewWidth, height: $viewHeight)
+                readerContent
 
                 if showTOC && sizeClass != .compact {
                     Color.clear
@@ -219,7 +261,7 @@ struct EPubReaderView: View {
 
                     HStack(spacing: 0) {
                         TableOfContentsView(
-                            entries: book.tableOfContents,
+                            entries: tableOfContents,
                             currentTOCLabel: currentTOCLabel,
                             bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash).compactMap(\.tocLabel)),
                             onSelect: { entry in
@@ -250,7 +292,7 @@ struct EPubReaderView: View {
                 }
             }
         }
-        .navigationTitle(book.metadata.title)
+        .navigationTitle(title)
         .focusable()
         .focusEffectDisabled()
         .onKeyPress(.leftArrow, phases: [.down, .repeat]) { event in
@@ -273,7 +315,7 @@ struct EPubReaderView: View {
         )) {
             NavigationStack {
                 TableOfContentsView(
-                    entries: book.tableOfContents,
+                    entries: tableOfContents,
                     currentTOCLabel: currentTOCLabel,
                     bookmarkTOCLabels: Set(bookmarkStore.bookmarks(for: fileHash).compactMap(\.tocLabel)),
                     onSelect: { entry in
@@ -347,24 +389,18 @@ struct EPubReaderView: View {
     // MARK: - Content
 
     @ViewBuilder
-    private var epubContent: some View {
+    private var readerContent: some View {
         if let bookTempURL, bookLoadError == nil {
             WebViewRepresentable(
                 content: WebViewContent(
-                    fileURL: URL(fileURLWithPath: "/"),
-                    baseURL: URL(fileURLWithPath: "/"),
-                    scrollFraction: nil,
-                    fragment: nil,
-                    cssOverride: nil,
-                    paginated: isPaginated,
-                    isEPub: true,
+                    baseURL: bookTempURL.deletingLastPathComponent(),
                     bookFileURL: bookTempURL,
-                    resourceLease: bookDirectory
+                    resourceBaseURL: source.text != nil ? fileURL?.deletingLastPathComponent() : nil,
+                    resourceLease: bookDirectory,
+                    scrollFraction: restorePosition?.textFraction,
+                    textAnchor: restorePosition?.textAnchor
                 ),
                 proxy: webViewProxy,
-                onScrollPositionChange: { fraction in
-                    currentFraction = fraction
-                },
                 onRelocate: { event in
                     handleRelocate(event)
                 },
@@ -407,7 +443,7 @@ struct EPubReaderView: View {
             #endif
         } else if let bookLoadError {
             ContentUnavailableView {
-                Label("Unable to Display ePub", systemImage: "book.closed")
+                Label("Unable to Display Document", systemImage: "book.closed")
             } description: {
                 Text(bookLoadError)
             } actions: {
@@ -427,7 +463,7 @@ struct EPubReaderView: View {
 
     #if os(macOS)
     @ToolbarContentBuilder
-    private var epubToolbar: some ToolbarContent {
+    private var readerToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .automatic) {
             Button(action: goBack) {
                 Label("Previous", systemImage: "chevron.left")
@@ -453,7 +489,16 @@ struct EPubReaderView: View {
             }
         }
 
-        if isPaginated {
+        if source.isMarkdown {
+            ToolbarItem(placement: .automatic) {
+                Button { renderMarkdown.toggle() } label: {
+                    Label(renderMarkdown ? "Raw Text" : "Render Markdown",
+                          systemImage: renderMarkdown ? "doc.plaintext" : "doc.richtext")
+                }
+            }
+        }
+
+        if isPaginated && source.text == nil {
             ToolbarItemGroup(placement: .automatic) {
                 Button(action: goToPreviousChapter) {
                     Label("Previous Chapter", systemImage: "backward.end")
@@ -468,7 +513,7 @@ struct EPubReaderView: View {
             Button { withAnimation { showTOC.toggle() } } label: {
                 Label("Table of Contents", systemImage: showTOC ? "list.bullet.indent" : "list.bullet")
             }
-            .disabled(book.tableOfContents.isEmpty)
+            .disabled(tableOfContents.isEmpty)
         }
 
         ToolbarItem(placement: .automatic) {
@@ -498,7 +543,7 @@ struct EPubReaderView: View {
     private var iOSTopBar: some View {
         HStack {
             HStack(spacing: 16) {
-                if !book.tableOfContents.isEmpty && sizeClass != .compact {
+                if !tableOfContents.isEmpty && sizeClass != .compact {
                     Button {
                         withAnimation { showTOC.toggle() }
                     } label: {
@@ -526,7 +571,7 @@ struct EPubReaderView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(book.metadata.title)
+            Text(title)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
 
@@ -540,7 +585,7 @@ struct EPubReaderView: View {
                     )
                 }
                 Section {
-                    if !book.tableOfContents.isEmpty {
+                    if !tableOfContents.isEmpty {
                         Button { withAnimation { showTOC.toggle() } } label: {
                             Label(
                                 showTOC ? "Hide Table of Contents" : "Show Table of Contents",
@@ -556,7 +601,7 @@ struct EPubReaderView: View {
                         Label("Search", systemImage: "magnifyingglass")
                     }
                 }
-                if isPaginated {
+                if isPaginated && source.text == nil {
                     Section {
                         Button { goToPreviousChapter() } label: { Label("Previous Chapter", systemImage: "backward.end") }
                         Button { goToNextChapter() } label: { Label("Next Chapter", systemImage: "forward.end") }
@@ -566,6 +611,14 @@ struct EPubReaderView: View {
                     Button { toggleReadAloud() } label: {
                         Label(narrationIsActive ? "Stop Read Aloud" : "Read Aloud",
                               systemImage: narrationIsActive ? "speaker.slash" : "speaker.wave.2")
+                    }
+                }
+                if source.isMarkdown {
+                    Section {
+                        Button { renderMarkdown.toggle() } label: {
+                            Label(renderMarkdown ? "Raw Text" : "Render Markdown",
+                                  systemImage: renderMarkdown ? "doc.plaintext" : "doc.richtext")
+                        }
                     }
                 }
                 Section {
@@ -581,7 +634,7 @@ struct EPubReaderView: View {
         .padding(.horizontal)
         .padding(.vertical, 20)
         .background {
-            Rectangle().fill(.bar).ignoresSafeArea(edges: .top)
+            ReaderChromeBackground().ignoresSafeArea(edges: .top)
         }
     }
     #endif
@@ -601,20 +654,27 @@ struct EPubReaderView: View {
             .padding(.horizontal)
             .padding(.top, 6)
             HStack {
-                Text(progressLabel).font(.caption).monospacedDigit().lineLimit(1)
-                Spacer()
+                ReaderPageField(page: bookPage + 1, pageCount: bookPages,
+                                goToPage: { webViewProxy.goToPage?($0) }, isEstimated: bookPagesEstimated)
+                    .disabled(!hasLocation)
+                Spacer(minLength: 8)
+                Text(pageRangeLabel)
+                    .font(.caption).monospacedDigit().lineLimit(1)
+                    .accessibilityIdentifier("reader-page-range")
             }
             .padding(.horizontal)
             .padding(.vertical, 6)
         }
-        .background(.bar)
+        .background { ReaderChromeBackground().ignoresSafeArea(edges: .bottom) }
     }
 
-    private var progressLabel: String {
-        let chapterPct = totalPages > 0 ? Int(Double(currentPage) / Double(totalPages) * 100) : 0
-        let safeFraction = currentFraction.isNaN || currentFraction.isInfinite ? 0.0 : currentFraction
-        let bookPct = Int(safeFraction * 100)
-        return "chapter: \(chapterPct)%  book: \(bookPct)%"
+    /// Keep the full visible range separate from the editable jump destination.
+    /// A rendered page can contain several whole-book estimated pages.
+    private var pageRangeLabel: String {
+        let first = bookPage + 1
+        let last = bookPageEnd + 1
+        let range = last > first ? "\(first)–\(last)" : "\(first)"
+        return bookPagesEstimated ? "Est. pages \(range) of \(bookPages)" : "Page \(range) of \(bookPages)"
     }
 
     // MARK: - Navigation
@@ -635,6 +695,12 @@ struct EPubReaderView: View {
         webViewProxy.nextSection?()
     }
 
+    private func navigate(to position: ReadingPosition) {
+        if let anchor = position.textAnchor { webViewProxy.goToTextAnchor?(anchor) }
+        else if let fraction = position.textFraction { webViewProxy.goToFraction?(fraction) }
+        else if case .epubCFI(let cfi, _) = position, !cfi.isEmpty { webViewProxy.goTo?(cfi) }
+    }
+
     private func navigateToTOCEntry(_ entry: EPubBook.TOCEntry) {
         webViewProxy.goTo?(entry.href)
     }
@@ -653,21 +719,9 @@ struct EPubReaderView: View {
         // 1 / 2 force a fixed column count. iPhone always gets 1.
         let cols = ReaderHelpers.resolveColumnCountForBridge(twoUpOverride)
 
-        // Load position for restoration: auto-saved position first, then manual bookmarks
         let lastCFI: String?
-        if let autoSaved = bookmarkStore.savedPosition(for: fileHash),
-           case .epubCFI(let cfi, _) = autoSaved.position, !cfi.isEmpty {
-            lastCFI = cfi
-        } else if let mostRecent = bookmarkStore.bookmarks(for: fileHash).first {
-            switch mostRecent.position {
-            case .epubCFI(let cfi, _) where !cfi.isEmpty:
-                lastCFI = cfi
-            default:
-                lastCFI = nil
-            }
-        } else {
-            lastCFI = nil
-        }
+        if case .epubCFI(let cfi, _) = restorePosition, !cfi.isEmpty { lastCFI = cfi }
+        else { lastCFI = nil }
 
         // Open book, apply settings, and init navigation in one chained call.
         // Both margin pairs go to the bridge so it can pick the right one
@@ -679,52 +733,51 @@ struct EPubReaderView: View {
     }
 
     private func handleRelocate(_ event: RelocateEvent) {
-        if let fraction = event.fraction, fraction.isFinite { currentFraction = fraction }
+        if let fraction = event.fraction, fraction.isFinite { currentFraction = min(1, max(0, fraction)) }
+        if let anchor = event.textAnchor { currentTextAnchor = anchor }
+        hasLocation = true
         if let cfi = event.cfi { currentCFI = cfi }
         if let label = event.tocLabel { currentTOCLabel = label }
         if let start = event.atStart { atStart = start }
         if let end = event.atEnd { atEnd = end }
-        if let page = event.page { currentPage = page }
-        if let pages = event.pages { totalPages = pages }
-        if let idx = event.sectionIndex { sectionIndex = idx }
-        if let count = event.sectionCount { sectionCount = count }
-        autoSavePosition()
+        if let estimated = event.bookPagesEstimated { bookPagesEstimated = estimated }
+        if let pages = event.bookPages, pages > 0 { bookPages = pages }
+        if let page = event.bookPage { bookPage = min(bookPages - 1, max(0, page)) }
+        bookPageEnd = min(bookPages - 1, max(bookPage, event.bookPageEnd ?? bookPage))
     }
 
     private var isCurrentPositionBookmarked: Bool {
-        let position: ReadingPosition = .epubCFI(currentCFI ?? "", fraction: currentFraction)
-        return bookmarkStore.isPositionBookmarked(fileHash: fileHash, position: position)
+        bookmarkStore.isPositionBookmarked(fileHash: fileHash, position: currentPosition)
     }
 
     private func toggleBookmark() {
+        guard hasLocation else { return }
         ReaderHelpers.toggleBookmark(
             store: bookmarkStore, fileURL: fileURL, fileHash: fileHash,
-            rawData: rawData, position: .epubCFI(currentCFI ?? "", fraction: currentFraction),
+            rawData: rawData, position: currentPosition,
             tocLabel: currentTOCLabel
         )
     }
 
     private func autoSavePosition() {
         guard let url = fileURL else { return }
-        let cfi = currentCFI ?? ""
-        guard !cfi.isEmpty || currentFraction > 0 else { return }
-        let position: ReadingPosition = .epubCFI(cfi, fraction: currentFraction)
+        guard hasLocation else { return }
         bookmarkStore.savePosition(
-            position, for: url, data: rawData,
+            currentPosition, for: url, data: rawData,
             tocLabel: currentTOCLabel, fileHash: fileHash, session: readingSession
         )
     }
 
     // MARK: - Search
 
-    private func performEPubSearch(_ query: String) {
+    private func performSearch(_ query: String) {
         search.isSearching = true
         searchResults = []
         search.currentIndex = 0
         webViewProxy.search?(query)
     }
 
-    private func clearEPubSearch() {
+    private func clearSearch() {
         webViewProxy.clearSearch?()
         searchResults = []
         search.currentIndex = 0

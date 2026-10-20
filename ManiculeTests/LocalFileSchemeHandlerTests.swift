@@ -2,6 +2,18 @@ import XCTest
 @testable import Manicule
 
 final class LocalFileSchemeHandlerTests: XCTestCase {
+    @MainActor
+    func testGeneratedPublicationRouteCannotEscapeItsLease() throws {
+        let lease = try TemporaryDirectoryLease.create(prefix: "text-routing")
+        let manifest = lease.url.appendingPathComponent("publication.json")
+        let roots = LocalFileSchemeHandler.Roots(base: lease.url, document: nil,
+            bundle: Bundle.main.resourceURL, book: manifest, lease: lease)
+        XCTAssertEqual(try roots.resolve(URL(string: "epub-local://bundle/publication.json")!), manifest)
+        XCTAssertEqual(try roots.resolve(URL(string: "epub-local://bundle/text/content.html")!),
+                       lease.url.appendingPathComponent("content.html"))
+        XCTAssertThrowsError(try roots.resolve(URL(string: "epub-local://bundle/text/../../outside.html")!))
+    }
+
     func testRejectsBundleTraversal() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("scheme-root-\(UUID().uuidString)")

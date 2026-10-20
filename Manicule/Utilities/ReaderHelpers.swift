@@ -117,9 +117,9 @@ enum ReaderHelpers {
     // MARK: - Page Label
 
     /// Formats a page label like "3 of 10" or "3–4 of 10" for two-up mode.
-    static func pageLabel(current: Int, total: Int, twoUp: Bool) -> String {
+    static func pageLabel(current: Int, total: Int, twoUp: Bool, coverOnRight: Bool = false) -> String {
         guard total > 0 else { return "" }
-        if twoUp && current + 1 < total {
+        if twoUp && !(coverOnRight && current == 0) && current + 1 < total {
             return "\(current + 1)–\(current + 2) of \(total)"
         }
         return "\(current + 1) of \(total)"

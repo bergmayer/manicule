@@ -62,17 +62,27 @@ struct AutoSavedPosition: Codable, Identifiable, Sendable, Equatable {
 struct RelocateEvent {
     let fraction: Double?
     let cfi: String?
+    let textAnchor: TextAnchor?
     let tocLabel: String?
     let atStart: Bool?
     let atEnd: Bool?
     let page: Int?
     let pages: Int?
+    /// Whole-book estimates for reflowable books; spine pages for fixed layouts.
+    let bookPage: Int?
+    let bookPageEnd: Int?
+    let bookPages: Int?
+    let bookPagesEstimated: Bool?
     let sectionIndex: Int?
     let sectionCount: Int?
 
     init(from dict: [String: Any]) {
         fraction = dict["fraction"] as? Double
         cfi = dict["cfi"] as? String
+        if let value = dict["textAnchor"] as? [String: Any], let line = value["line"] as? Int {
+            textAnchor = TextAnchor(line: line, offset: value["offset"] as? Int ?? 0,
+                                    quote: value["quote"] as? String ?? "")
+        } else { textAnchor = nil }
         if let tocItem = dict["tocItem"] as? [String: Any] {
             tocLabel = tocItem["label"] as? String
         } else {
@@ -82,6 +92,10 @@ struct RelocateEvent {
         atEnd = dict["atEnd"] as? Bool
         page = dict["page"] as? Int
         pages = dict["pages"] as? Int
+        bookPage = dict["bookPage"] as? Int
+        bookPageEnd = dict["bookPageEnd"] as? Int
+        bookPages = dict["bookPages"] as? Int
+        bookPagesEstimated = dict["bookPagesEstimated"] as? Bool
         if let section = dict["section"] as? [String: Any] {
             sectionIndex = section["current"] as? Int
             sectionCount = section["total"] as? Int

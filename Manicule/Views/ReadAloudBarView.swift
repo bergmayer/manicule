@@ -85,7 +85,7 @@ struct ReadAloudBarView: View {
                     .offset(y: -44)
             }
         }
-        .background(.bar)
+        .background(ReaderChromeBackground())
         .sheet(isPresented: $showVoicePicker) {
             VoicePickerView(controller: controller)
         }

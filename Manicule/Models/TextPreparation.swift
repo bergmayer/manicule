@@ -1,80 +1,151 @@
 import Foundation
 
+/// Converts text into a sectioned publication for the same Foliate renderer as
+/// EPUB. Generated files are immutable and owned by one temporary-directory lease.
 nonisolated enum TextPreparation {
     struct Prepared: Sendable {
         let directory: TemporaryDirectoryLease
-        let chunks: [String]
-        let chunkSourceLines: [Int]
+        let tableOfContents: [EPubBook.TOCEntry]
     }
 
-    /// Creates a temporary HTML file for WebView display.
-    /// Uses markdown-to-HTML conversion when rendering is enabled, otherwise escaped plain text.
-    nonisolated static func prepare(_ rawText: String, reflow: Bool, markdown: Bool, hasFile: Bool) throws -> Prepared {
+    private struct Block {
+        let html: String
+        let firstLine: Int
+        let lastLine: Int
+        var offset = 0
+        var heading: Int? = nil
+    }
+    private struct Section: Encodable {
+        let href: String
+        let size: Int
+        let firstLine: Int
+        let firstOffset: Int
+    }
+    private struct Entry: Encodable {
+        let label: String
+        let href: String
+    }
+    private struct Publication: Encodable {
+        let title: String
+        let sections: [Section]
+        let toc: [Entry]
+    }
+
+    static func prepare(_ rawText: String, reflow: Bool, markdown: Bool,
+                        hasFile: Bool, title: String = "Document",
+                        markdownSource: Bool = false) throws -> Prepared {
         try Task.checkCancellation()
-        var text = rawText
-        if reflow {
-            text = TextReflow.reflow(text)
-        }
+        let text = reflow ? TextReflow.reflow(rawText) : rawText
         let sourceLines = sourceLineMap(rawText, displayedText: text)
-        let bodyContent: String
-
+        let blocks: [Block]
         if markdown {
-            bodyContent = MarkdownHTMLRenderer.render(text, headingAnchorPrefix: "toc-", includeSourceLines: true)
+            blocks = MarkdownHTMLRenderer.blocks(text, headingAnchorPrefix: "toc-", includeSourceLines: true).map {
+                Block(html: $0.html, firstLine: $0.sourceLine, lastLine: $0.endLine, heading: $0.headingIndex)
+            }
         } else {
-            // Inline spans preserve the existing paragraph and line breaks.
-            let lines = text.components(separatedBy: "\n")
-            let marked = lines.enumerated().map { index, line in
-                line.isEmpty ? "" : "<span data-source-line=\"\(sourceLines[index])\">\(escapeHTML(line))</span>"
-            }.joined(separator: "\n")
-            bodyContent = "<p>" + marked
-                .replacingOccurrences(of: "\n\n", with: "</p><p>")
-                .replacingOccurrences(of: "\n", with: "<br>") + "</p>"
+            // Group lines into paragraphs, retaining source locations for mode
+            // switches and old bookmarks. Bound raw blocks even without blank lines.
+            var paragraphs: [Block] = [], lines: [String] = []
+            var length = 0, startLine = 0, endLine = 0
+            func finishParagraph() {
+                if !lines.isEmpty {
+                    paragraphs.append(Block(html: "<p>" + lines.joined(separator: "<br>") + "</p>",
+                        firstLine: startLine, lastLine: endLine))
+                }
+                lines = []; length = 0
+            }
+            for (index, line) in text.components(separatedBy: "\n").enumerated() {
+                try Task.checkCancellation()
+                if line.isEmpty || length >= 32_768 { finishParagraph() }
+                guard !line.isEmpty else { continue }
+                let sourceLine = sourceLines[index]
+                // A minified or newline-free file must not force one enormous
+                // layout frame. UTF-16 offsets preserve anchors across its slices.
+                if line.utf8.count > 32_768 {
+                    finishParagraph()
+                    var start = line.startIndex, offset = 0
+                    while start < line.endIndex {
+                        try Task.checkCancellation()
+                        let end = line.index(start, offsetBy: 8192, limitedBy: line.endIndex) ?? line.endIndex
+                        let part = String(line[start..<end])
+                        let span = "<p class=\"text-slice\"><span data-source-line=\"\(sourceLine)\" data-source-offset=\"\(offset)\">\(escapeHTML(part))</span></p>"
+                        paragraphs.append(Block(html: span, firstLine: sourceLine, lastLine: sourceLine, offset: offset))
+                        offset += part.utf16.count
+                        start = end
+                    }
+                } else {
+                    if lines.isEmpty { startLine = sourceLine }
+                    endLine = sourceLine
+                    lines.append("<span id=\"line-\(sourceLine)\" data-source-line=\"\(sourceLine)\">\(escapeHTML(line))</span>")
+                    length += line.utf8.count
+                }
+            }
+            finishParagraph()
+            blocks = paragraphs
         }
-
-        let baseElement = markdown && hasFile
-            ? "<base href=\"epub-local://document/\">" : ""
-
-        let html = """
-        <!DOCTYPE html>
-        <html><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src epub-local: data: https:; font-src epub-local: data:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'">
-        \(baseElement)
-        <style>
-        body {
-            background-color: #ffffff;
-            color: #000000;
-            margin: 0;
-            padding: 16px;
-            word-wrap: break-word;
+        let directory = try TemporaryDirectoryLease.create(prefix: "manicule-text")
+        var sections: [Section] = [], toc: [Entry] = []
+        var pending: [String] = [], pendingSize = 0
+        var firstLine = 0, firstOffset = 0
+        var headingCursor = 0
+        var headings: [(Int, String)] = []
+        if markdown || markdownSource {
+            var inFence = false
+            for (line, value) in rawText.components(separatedBy: "\n").enumerated() {
+                let trimmed = value.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("```") { inFence.toggle(); continue }
+                if !inFence, let (_, title) = MarkdownHTMLRenderer.parseHeading(trimmed) {
+                    headings.append((line, title))
+                }
+            }
         }
-        h1, h2, h3, h4, h5, h6 { margin-top: 1em; margin-bottom: 0.5em; }
-        h1 { font-size: 1.8em; }
-        h2 { font-size: 1.5em; }
-        h3 { font-size: 1.3em; }
-        h4 { font-size: 1.1em; }
-        pre { background: #f4f4f4; padding: 12px; border-radius: 4px; overflow-x: auto; }
-        code { font-family: 'SF Mono', Menlo, monospace; font-size: 0.9em; }
-        :not(pre) > code { background: #f0f0f0; padding: 2px 4px; border-radius: 3px; }
-        blockquote {
-            border-left: 3px solid #ccc;
-            margin: 0.5em 0;
-            padding: 0.25em 1em;
-            color: #555;
+        func flush() throws {
+            try Task.checkCancellation()
+            let href = sections.isEmpty ? "content.html" : "section-\(sections.count).html"
+            let body = pending.isEmpty ? "<p data-source-line=\"0\"><br></p>" : pending.joined(separator: "\n")
+            let base = hasFile ? "<base href=\"epub-local://document/\">" : ""
+            let html = """
+            <!DOCTYPE html><html><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src epub-local: data: https:; font-src epub-local: data:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'">
+            \(base)
+            <style>
+            body { margin: 0; overflow-wrap: break-word; }
+            p.text-slice { margin-block: 0; }
+            pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+            code { font-family: 'SF Mono', Menlo, monospace; }
+            img, table { max-width: 100%; }
+            blockquote { border-inline-start: 3px solid currentColor; padding-inline-start: 1em; }
+            </style></head><body>\(body)</body></html>
+            """
+            try Data(html.utf8).write(to: directory.url.appendingPathComponent(href), options: .atomic)
+            sections.append(Section(href: href, size: max(1, pendingSize), firstLine: firstLine, firstOffset: firstOffset))
+            pending = []; pendingSize = 0
         }
-        hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
-        img { max-width: 100%; height: auto; }
-        a { color: #0066cc; }
-        </style>
-        </head><body>\(bodyContent)</body></html>
-        """
-
+        for block in blocks {
+            try Task.checkCancellation()
+            let count = block.html.utf8.count
+            if pendingSize >= 65_536 { try flush() }
+            if pending.isEmpty { firstLine = block.firstLine; firstOffset = block.offset }
+            let href = sections.isEmpty ? "content.html" : "section-\(sections.count).html"
+            if markdown, let index = block.heading, headings.indices.contains(index) {
+                toc.append(Entry(label: headings[index].1, href: "\(href)#toc-\(index)"))
+            } else if markdownSource && !markdown {
+                while headingCursor < headings.count && headings[headingCursor].0 <= block.lastLine {
+                    let (line, label) = headings[headingCursor]
+                    if line >= block.firstLine { toc.append(Entry(label: label, href: "\(href)#line-\(line)")) }
+                    headingCursor += 1
+                }
+            }
+            pending.append(block.html); pendingSize += count
+        }
+        if !pending.isEmpty || sections.isEmpty { try flush() }
+        let manifest = Publication(title: title, sections: sections, toc: toc)
+        try JSONEncoder().encode(manifest).write(to: directory.url.appendingPathComponent("publication.json"), options: .atomic)
         try Task.checkCancellation()
-        let directory = try TemporaryDirectoryLease.writing(Data(html.utf8), filename: "content.html")
-        let textChunks = chunks(text)
-        try Task.checkCancellation()
-        return Prepared(directory: directory, chunks: textChunks,
-                        chunkSourceLines: stride(from: 0, to: sourceLines.count, by: 100).map { sourceLines[$0] })
+        return Prepared(directory: directory, tableOfContents: toc.enumerated().map { index, entry in
+            EPubBook.TOCEntry(id: "text-\(index)", title: entry.label, href: entry.href, children: [])
+        })
     }
 
     /// Reflow changes whitespace only. Walk the source once to associate each
@@ -103,18 +174,4 @@ nonisolated enum TextPreparation {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
-    nonisolated static func chunks(_ source: String) -> [String] {
-        let lines = source.components(separatedBy: "\n")
-        let chunkSize = 100
-        var chunks: [String] = []
-        chunks.reserveCapacity((lines.count + chunkSize - 1) / chunkSize)
-        var i = 0
-        while i < lines.count {
-            let end = min(i + chunkSize, lines.count)
-            chunks.append(lines[i..<end].joined(separator: "\n"))
-            i = end
-        }
-        return chunks
-    }
-
 }

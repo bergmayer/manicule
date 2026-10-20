@@ -36,7 +36,7 @@ The macOS Debug and Release configurations use “Sign to Run Locally,” so the
 
 ## Third-party code
 
-ePub rendering uses [foliate-js](https://github.com/johnfactotum/foliate-js) by John Factotum, vendored in `Manicule/Resources/foliate-js/`. It handles ePub parsing, pagination, CFI-based navigation, and search. MIT licensed; see `Manicule/Resources/foliate-js/LICENSE`.
+EPUB, plain text, and Markdown layout use [foliate-js](https://github.com/johnfactotum/foliate-js) by John Factotum, vendored in `Manicule/Resources/foliate-js/`. It handles EPUB parsing and shared pagination, scrolling, navigation, and search. Text and Markdown are supplied as generated HTML sections; they do not need to be converted into EPUB archives. MIT licensed; see `Manicule/Resources/foliate-js/LICENSE`.
 
 Swift package dependencies, resolved by Xcode:
 

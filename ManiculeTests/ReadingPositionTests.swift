@@ -248,6 +248,21 @@ final class PreferencePersistenceTests: XCTestCase {
         override func synchronize() -> Bool { true }
     }
 
+    func testFacingPagePairingPersistsPerBookWithoutChangingOtherBooks() throws {
+        let suite = "Manicule.PairingTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let cloud = Cloud()
+        let preferences = ReadingPreferences(defaults: defaults, cloud: cloud, updatePinnedStatus: { _ in })
+        preferences.setViewMode(.paginated, twoUp: true, coverOnRight: true, for: "magazine")
+        XCTAssertTrue(preferences.effective(for: "magazine").coverOnRight)
+        XCTAssertFalse(preferences.effective(for: "other-book").coverOnRight)
+        let restored = ReadingPreferences(defaults: defaults, cloud: cloud, updatePinnedStatus: { _ in })
+        XCTAssertTrue(restored.effective(for: "magazine").coverOnRight)
+        restored.setViewMode(.paginated, twoUp: false, for: "magazine")
+        XCTAssertTrue(restored.effective(for: "magazine").coverOnRight)
+    }
+
     func testMalformedCloudDoesNotOverwriteLocalPreferencesOrRemoteBytes() throws {
         let suite = "Manicule.PreferenceTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
