@@ -39,6 +39,9 @@ struct FlowingReaderView: View {
     @State private var showSettings: Bool = false
     private var viewMode: ViewMode { readingPrefs.effective(for: fileHash).viewMode }
     private var twoUpOverride: Bool? { readingPrefs.effective(for: fileHash).twoUp }
+    private var coverOnRight: Bool { readingPrefs.effective(for: fileHash).coverOnRight }
+    @State private var viewWidth: CGFloat = 0
+    @State private var viewHeight: CGFloat = 0
     @State private var webViewProxy = WebViewProxy()
     @State private var bridgeReady = false
     @State private var bookDirectory: TemporaryDirectoryLease?
@@ -110,6 +113,7 @@ struct FlowingReaderView: View {
 
     var body: some View {
         readerLayoutWithToolbar
+            .trackViewportSize(width: $viewWidth, height: $viewHeight)
             .sheet(isPresented: $showBookmarks) {
                 NavigationStack {
                     BookmarkPickerView(fileHash: fileHash) { position in
@@ -134,6 +138,9 @@ struct FlowingReaderView: View {
             .onChange(of: twoUpOverride) { _, value in
                 webViewProxy.setColumnCount?(ReaderHelpers.resolveColumnCountForBridge(value))
                 restoreCurrentPosition()
+            }
+            .onChange(of: coverOnRight) { _, shifted in
+                webViewProxy.setPagePairing?(shifted)
             }
             .onChange(of: marginPairs) { _, _ in
                 sendBothMargins()
@@ -729,7 +736,7 @@ struct FlowingReaderView: View {
         webViewProxy.openAndInit?(flow, css,
                                   oneUp.topBottom, oneUp.leftRight,
                                   twoUp.topBottom, twoUp.leftRight,
-                                  cols, lastCFI)
+                                  cols, lastCFI, coverOnRight)
     }
 
     private func handleRelocate(_ event: RelocateEvent) {
@@ -939,7 +946,11 @@ struct FlowingReaderView: View {
     }
 
     private func selectTwoPage() {
-        readingPrefs.setViewMode(.paginated, twoUp: true, for: fileHash)
+        let columns = ReaderHelpers.resolveColumnCountForBridge(twoUpOverride)
+        let alreadyTwoUp = isPaginated && (columns == 2 || (columns == nil && viewWidth > viewHeight))
+        readingPrefs.setViewMode(.paginated, twoUp: true,
+                                 coverOnRight: alreadyTwoUp ? !coverOnRight : coverOnRight,
+                                 for: fileHash)
     }
 
     private func selectScrolling() {

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import UniformTypeIdentifiers
 import ZIPFoundation
 import PDFKit
@@ -8,6 +9,47 @@ import ImageIO
 
 @MainActor
 final class DocumentContentTests: XCTestCase {
+
+    #if os(macOS)
+    func testMacPDFPairingRebuildShowsTheNewFacingPages() async throws {
+        let document = try XCTUnwrap(PDFDocument(data: Self.minimalPDF))
+        for index in 1..<4 {
+            document.insert(try XCTUnwrap(PDFDocument(data: Self.minimalPDF)?.page(at: 0)), at: index)
+        }
+        func content(_ shifted: Bool) -> some View {
+            PDFViewRepresentable(pdfDocument: document,
+                currentPageIndex: .constant(shifted ? 1 : 0),
+                paginated: true, twoUp: true, coverOnRight: shifted)
+                .id(shifted)
+        }
+        let host = NSHostingView(rootView: content(false))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        func findPDF(_ view: NSView) -> PDFView? {
+            if let pdf = view as? PDFView { return pdf }
+            return view.subviews.lazy.compactMap { findPDF($0) }.first
+        }
+        var previous: PDFView?
+        for shifted in [false, true, false, true] {
+            host.rootView = content(shifted)
+            var pdf: PDFView?
+            for _ in 0..<50 {
+                host.layoutSubtreeIfNeeded()
+                pdf = findPDF(host)
+                if let pdf, pdf !== previous,
+                   Set(pdf.visiblePages.map { document.index(for: $0) }) == Set(shifted ? [1, 2] : [0, 1]) { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            let rendered = try XCTUnwrap(pdf)
+            XCTAssertEqual(Set(rendered.visiblePages.map { document.index(for: $0) }), Set(shifted ? [1, 2] : [0, 1]))
+            if let previous { XCTAssertFalse(rendered === previous) }
+            previous = rendered
+        }
+    }
+    #endif
 
     #if !os(macOS)
     func testBookPairingLeavesCoverOnRightThenShowsPagesTwoAndThree() throws {

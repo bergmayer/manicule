@@ -225,7 +225,7 @@ final class WebViewProxy {
     var openAndInit: ((_ flow: String, _ css: String,
                        _ oneUpTB: Double, _ oneUpLR: Double,
                        _ twoUpTB: Double, _ twoUpLR: Double,
-                       _ maxColumnCount: Int?, _ lastLocation: String?) -> Void)?
+                       _ maxColumnCount: Int?, _ lastLocation: String?, _ coverOnRight: Bool) -> Void)?
     var goTo: ((String) -> Void)?              // CFI or href
     var goToFraction: ((Double) -> Void)?
     var goToPage: ((Int) -> Void)?
@@ -234,6 +234,7 @@ final class WebViewProxy {
     /// Sets the foliate paginator column preference: nil = auto (orientation-driven,
     /// foliate re-resolves on resize), 1 = force single page, 2 = force two-up.
     var setColumnCount: ((Int?) -> Void)?
+    var setPagePairing: ((Bool) -> Void)?
     /// Sends both margin pairs at once. The bridge stores both and picks
     /// one-up vs two-up automatically based on its resolved column count.
     /// Args: (oneUpTopBottom, oneUpLeftRight, twoUpTopBottom, twoUpLeftRight).
@@ -438,11 +439,11 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     func wireProxy(_ proxy: WebViewProxy?, refocus: @escaping () -> Void) {
         proxy?.nextPage = { [weak self] in self?.nextPage() }
         proxy?.previousPage = { [weak self] in self?.previousPage() }
-        proxy?.openAndInit = { [weak self] flow, css, oneTB, oneLR, twoTB, twoLR, cols, loc in
+        proxy?.openAndInit = { [weak self] flow, css, oneTB, oneLR, twoTB, twoLR, cols, loc, cover in
             self?.bridgeOpenAndInit(flow: flow, css: css,
                                     oneTB: oneTB, oneLR: oneLR,
                                     twoTB: twoTB, twoLR: twoLR,
-                                    maxColumnCount: cols, lastLocation: loc)
+                                    maxColumnCount: cols, lastLocation: loc, coverOnRight: cover)
         }
         proxy?.goTo = { [weak self] target in self?.bridgeGoTo(target) }
         proxy?.goToPage = { [weak self] page in self?.bridgeGoToPage(page) }
@@ -450,6 +451,9 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         proxy?.setFlow = { [weak self] mode in self?.bridgeSetFlow(mode) }
         proxy?.setStyles = { [weak self] css in self?.bridgeSetStyles(css) }
         proxy?.setColumnCount = { [weak self] n in self?.bridgeSetColumnCount(n) }
+        proxy?.setPagePairing = { [weak self] shifted in
+            self?.callBridge("window.bridge?.setPagePairing(shifted)", arguments: ["shifted": shifted])
+        }
         proxy?.setMarginsBoth = { [weak self] oneTB, oneLR, twoTB, twoLR in
             self?.bridgeSetMarginsBoth(oneTB: oneTB, oneLR: oneLR, twoTB: twoTB, twoLR: twoLR)
         }
@@ -735,7 +739,7 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     func bridgeOpenAndInit(flow: String, css: String,
                            oneTB: Double, oneLR: Double,
                            twoTB: Double, twoLR: Double,
-                           maxColumnCount: Int?, lastLocation: String?) {
+                           maxColumnCount: Int?, lastLocation: String?, coverOnRight: Bool = false) {
         var options: [String: Any] = ["showTextStart": true]
         if let lastLocation { options = ["lastLocation": lastLocation] }
         if let anchor = pendingTextAnchor, let data = try? JSONEncoder().encode(anchor),
@@ -751,11 +755,12 @@ class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             window.bridge.setFlow(flow);
             window.bridge.setStyles(css);
             window.bridge.setMarginsBoth(oneTB, oneLR, twoTB, twoLR);
+            await window.bridge.setPagePairing(coverOnRight);
             window.bridge.setColumnCount(columns);
             await window.bridge.init(options);
             """, arguments: ["url": publicationURL, "flow": flow, "css": css,
                 "oneTB": oneTB, "oneLR": oneLR, "twoTB": twoTB, "twoLR": twoLR,
-                "columns": maxColumnCount.map { $0 as Any } ?? "auto", "options": options])
+                "coverOnRight": coverOnRight, "columns": maxColumnCount.map { $0 as Any } ?? "auto", "options": options])
     }
 
     // MARK: - WKNavigationDelegate

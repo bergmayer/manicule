@@ -88,6 +88,133 @@ final class EPubWebViewIntegrationTests: XCTestCase {
         XCTAssertEqual(changed?["margin"] as? String, "60px")
     }
 
+    func testRepeatedTwoPagePairingChangesRenderedColumnsWithoutOnePageDetour() async throws {
+        let prepared = try text(String(repeating: "Distinct readable words across each column. ", count: 2000))
+        let reader = try await open(prepared, columns: 2)
+        defer { reader.close() }
+        let result = try await reader.view.callAsyncJavaScript("""
+            const renderer = document.querySelector('foliate-view').renderer;
+            const doc = renderer.getContents()[0].doc;
+            const first = doc.createRange();
+            first.setStart(doc.querySelector('p span').firstChild, 0);
+            first.setEnd(doc.querySelector('p span').firstChild, 1);
+            const settle = () => new Promise(r => setTimeout(r, 150));
+            const x = () => first.getBoundingClientRect().left;
+            const distant = first.cloneRange();
+            distant.setStart(first.startContainer, Math.min(1000, first.startContainer.length - 1));
+            distant.setEnd(first.startContainer, Math.min(1001, first.startContainer.length));
+            const distantOriginal = distant.getBoundingClientRect().left;
+            const visibleBefore = document.querySelector('foliate-view').lastLocation.range.toString().length;
+            const original = x();
+            window.bridge.setPagePairing(true);
+            await settle();
+            const visibleAfter = document.querySelector('foliate-view').lastLocation.range.toString().length;
+            const shifted = x();
+            const distantShifted = distant.getBoundingClientRect().left;
+            window.bridge.setPagePairing(false);
+            await settle();
+            const restored = x();
+            window.bridge.setPagePairing(true);
+            await settle();
+            const shiftedAgain = x();
+            window.bridge.setColumnCount(1);
+            await settle();
+            const singlePadding = doc.defaultView.getComputedStyle(doc.documentElement).paddingLeft;
+            window.bridge.setColumnCount(2);
+            await settle();
+            const reentered = x();
+            window.bridge.setFlow('scrolled');
+            await settle();
+            const scrollPadding = doc.defaultView.getComputedStyle(doc.documentElement).paddingLeft;
+            return { visibleBefore, visibleAfter, original, shifted, distantOriginal, distantShifted, restored, shiftedAgain, reentered, singlePadding, scrollPadding };
+            """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+        let original = try XCTUnwrap(result?["original"] as? Double)
+        let shifted = try XCTUnwrap(result?["shifted"] as? Double)
+        XCTAssertGreaterThan(shifted - original, 200, "Pairing must move the first column to the other half")
+        XCTAssertLessThan(try XCTUnwrap(result?["visibleAfter"] as? Int), try XCTUnwrap(result?["visibleBefore"] as? Int), "A shifted opening spread must contain one column of text")
+        let distantShift = try XCTUnwrap(result?["distantShifted"] as? Double) - XCTUnwrap(result?["distantOriginal"] as? Double)
+        XCTAssertEqual(distantShift, shifted - original, accuracy: 2, "Pairing must preserve column widths and text breaks")
+        XCTAssertEqual(try XCTUnwrap(result?["restored"] as? Double), original, accuracy: 2)
+        XCTAssertEqual(try XCTUnwrap(result?["shiftedAgain"] as? Double), shifted, accuracy: 2)
+        XCTAssertEqual(try XCTUnwrap(result?["reentered"] as? Double), shifted, accuracy: 2)
+        XCTAssertLessThan(Double((result?["singlePadding"] as? String ?? "").replacingOccurrences(of: "px", with: "")) ?? 1000, 100)
+        XCTAssertLessThan(Double((result?["scrollPadding"] as? String ?? "").replacingOccurrences(of: "px", with: "")) ?? 1000, 100)
+    }
+
+    func testPairingSupportsRTLAndVerticalText() async throws {
+        for (css, coordinate, sign) in [
+            ("body { font-size:20px; direction:rtl; }", "right", -1.0),
+            ("body { font-size:20px; writing-mode:vertical-rl; }", "top", 1.0)
+        ] {
+            let prepared = try text(String(repeating: "Readable words across columns. ", count: 2000))
+            let sectionDirectory = prepared.directory.url
+            for file in try FileManager.default.contentsOfDirectory(at: sectionDirectory, includingPropertiesForKeys: nil) {
+                guard file.pathExtension == "html" else { continue }
+                let html = try String(contentsOf: file, encoding: .utf8)
+                try html.replacingOccurrences(of: "<head>", with: "<head><style>\(css)</style>")
+                    .write(to: file, atomically: true, encoding: .utf8)
+            }
+            let reader = try await open(prepared, columns: 2)
+            defer { reader.close() }
+            let result = try await reader.view.callAsyncJavaScript("""
+                const renderer = document.querySelector('foliate-view').renderer;
+                const doc = renderer.getContents()[0].doc;
+                const range = doc.createRange();
+                range.setStart(doc.querySelector('p span').firstChild, 0);
+                range.setEnd(doc.querySelector('p span').firstChild, 1);
+                const original = range.getBoundingClientRect()[coordinate];
+                await window.bridge.setPagePairing(true);
+                await new Promise(r => setTimeout(r, 150));
+                const shifted = range.getBoundingClientRect()[coordinate];
+                await window.bridge.setPagePairing(false);
+                await new Promise(r => setTimeout(r, 150));
+                return { original, shifted, restored: range.getBoundingClientRect()[coordinate] };
+                """, arguments: ["coordinate": coordinate], in: nil, contentWorld: .page) as? [String: Any]
+            let original = try XCTUnwrap(result?["original"] as? Double)
+            XCTAssertGreaterThan(sign * (try XCTUnwrap(result?["shifted"] as? Double) - original), 200, css)
+            XCTAssertEqual(try XCTUnwrap(result?["restored"] as? Double), original, accuracy: 2, css)
+        }
+    }
+
+    func testFixedLayoutPairingRebuildsFramesAndPreservesAnchor() async throws {
+        let prepared = try text("Host publication")
+        let reader = try await open(prepared)
+        defer { reader.close() }
+        let result = try await reader.view.callAsyncJavaScript("""
+            await import('./fixed-layout.js');
+            const fixed = document.createElement('foliate-fxl');
+            fixed.style.cssText = 'position:fixed;inset:0;width:900px;height:700px';
+            document.body.append(fixed);
+            const urls = [1,2,3,4].map(n => URL.createObjectURL(new Blob([
+                `<html><head><meta name="viewport" content="width=400,height=600"></head><body>Page ${n}</body></html>`
+            ], { type: 'text/html' })));
+            const sections = urls.map(url => ({ load: async () => url }));
+            fixed.open({ sections, dir: 'ltr', rendition: {} });
+            const pages = () => fixed.getContents().map(x => x.doc?.body?.textContent?.trim()).filter(Boolean).join(',');
+            fixed.setAttribute('max-column-count', '2');
+            await fixed.setPagePairing(false);
+            const original = pages();
+            await fixed.setPagePairing(true);
+            const cover = pages();
+            await fixed.next();
+            const next = pages();
+            await fixed.setPagePairing(false);
+            const changed = pages();
+            await fixed.setPagePairing(true);
+            const restored = pages();
+            await fixed.next();
+            const last = pages();
+            fixed.destroy(); fixed.remove(); urls.forEach(URL.revokeObjectURL);
+            return { original, cover, next, changed, restored, last };
+            """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+        XCTAssertEqual(result?["original"] as? String, "Page 1,Page 2")
+        XCTAssertEqual(result?["cover"] as? String, "Page 1")
+        XCTAssertEqual(result?["next"] as? String, "Page 2,Page 3")
+        XCTAssertEqual(result?["changed"] as? String, "Page 1,Page 2")
+        XCTAssertEqual(result?["restored"] as? String, "Page 2,Page 3")
+        XCTAssertEqual(result?["last"] as? String, "Page 4")
+    }
+
     func testSharedTypographyPreservesHeadingsAndThemes() async throws {
         let prepared = try text("# Heading\n\nA **bold** paragraph.", markdown: true)
         let preferences = EffectivePreferences(fontFamily: .georgia, fontSize: 22, lineSpacing: 1.6,

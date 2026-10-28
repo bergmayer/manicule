@@ -41,10 +41,17 @@ final class FacingPageUITests: XCTestCase {
     }
 
     func testTwoPagesChoiceShiftsCoverAndRemembersPairing() throws {
+        try exercisePairing(url: makePDF())
+    }
+
+    func testCBZTwoPagesChoiceShiftsCoverAndRemembersPairing() throws {
+        try exercisePairing(url: makeCBZ())
+    }
+
+    private func exercisePairing(url: URL) throws {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }
-        let url = try makePDF()
         defer { try? FileManager.default.removeItem(at: url) }
         let app = XCUIApplication()
         app.open(url)
@@ -62,6 +69,22 @@ final class FacingPageUITests: XCTestCase {
         let right = app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
         let left = app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
         right.press(forDuration: 0.05, thenDragTo: left)
+        expect("2–3 of 4")
+        flipPairing()
+        expect("1–2 of 4")
+        flipPairing()
+        expect("2–3 of 4")
+        // Enter a shifted spread from page 3, then switch through one page.
+        // Re-entering two-up must anchor on page 2, not retain page 3's old anchor.
+        flipPairing()
+        right.press(forDuration: 0.05, thenDragTo: left)
+        expect("3–4 of 4")
+        flipPairing()
+        expect("2–3 of 4")
+        app.buttons["Menu"].tap()
+        app.buttons["Single Page"].tap()
+        expect("2 of 4")
+        flipPairing()
         expect("2–3 of 4")
         flipPairing()
         expect("1–2 of 4")
@@ -184,6 +207,18 @@ final class FacingPageUITests: XCTestCase {
         attachment.name = "Whole-book estimated page entry"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func makeCBZ() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("facing-\(UUID().uuidString).cbz")
+        // Four distinct PNG pages in a stored ZIP. A unique ZIP comment keeps
+        // this fixture independent of per-book settings from earlier runs.
+        var data = try XCTUnwrap(Data(base64Encoded: "UEsDBBQAAAAAAFQ+XF39BMGKTgAAAE4AAAALAAAAcGFnZTAwMS5wbmeJUE5HDQoaCgAAAA1JSERSAAAADAAAABAIAgAAAK0DCVAAAAAVSURBVHicY3CrOEEQMYwqGlVEnCIA6I8kkDNPmvwAAAAASUVORK5CYIJQSwMEFAAAAAAAVD5cXfZGrYNOAAAATgAAAAsAAABwYWdlMDAyLnBuZ4lQTkcNChoKAAAADUlIRFIAAAAMAAAAEAgCAAAArQMJUAAAABVJREFUeJxjMNrSRBAxjCoaVUScIgAImA4QhZ0wvQAAAABJRU5ErkJgglBLAwQUAAAAAABUPlxdxz0eBk4AAABOAAAACwAAAHBhZ2UwMDMucG5niVBORw0KGgoAAAANSUhEUgAAAAwAAAAQCAIAAACtAwlQAAAAFUlEQVR4nGN4Nk2DIGIYVTSqiDhFAN4kOxC8Zaz/AAAAAElFTkSuQmCCUEsDBBQAAAAAAFQ+XF3djkCQTgAAAE4AAAALAAAAcGFnZTAwNC5wbmeJUE5HDQoaCgAAAA1JSERSAAAADAAAABAIAgAAAK0DCVAAAAAVSURBVHicYzjhVkEQMYwqGlVEnCIAhh4kkM8S1+YAAAAASUVORK5CYIJQSwECFAMUAAAAAABUPlxd/QTBik4AAABOAAAACwAAAAAAAAAAAAAAgAEAAAAAcGFnZTAwMS5wbmdQSwECFAMUAAAAAABUPlxd9katg04AAABOAAAACwAAAAAAAAAAAAAAgAF3AAAAcGFnZTAwMi5wbmdQSwECFAMUAAAAAABUPlxdxz0eBk4AAABOAAAACwAAAAAAAAAAAAAAgAHuAAAAcGFnZTAwMy5wbmdQSwECFAMUAAAAAABUPlxd3Y5AkE4AAABOAAAACwAAAAAAAAAAAAAAgAFlAQAAcGFnZTAwNC5wbmdQSwUGAAAAAAQABADkAAAA3AEAAAAA"))
+        let comment = Data(UUID().uuidString.utf8)
+        data.replaceSubrange((data.count - 2)..<data.count, with: [UInt8(comment.count), 0])
+        data.append(comment)
+        try data.write(to: url)
+        return url
     }
 
     private func makePDF() throws -> URL {

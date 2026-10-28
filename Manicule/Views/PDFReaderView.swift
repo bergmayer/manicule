@@ -324,6 +324,9 @@ struct PDFReaderView: View {
             onPreviousPage: previousPage
         )
         #if os(macOS)
+        // Recreate PDFKit's cached spread layout when pairing changes, including
+        // when the current page stays at the cover and no navigation is needed.
+        .id(coverOnRight)
         .padding(.leading, isPaginated && effectiveTwoUp && coverOnRight && currentPageIndex == 0 ? viewWidth / 2 : 0)
         .padding(.trailing, isPaginated && effectiveTwoUp && currentPageIndex == pageCount - 1
             && !(coverOnRight && currentPageIndex == 0) ? viewWidth / 2 : 0)
@@ -691,12 +694,12 @@ struct PDFReaderView: View {
 
 
     private func selectAutomatic() {
-
+        pairingAnchorPage = nil
         readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
-
+        pairingAnchorPage = nil
         readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
@@ -710,7 +713,7 @@ struct PDFReaderView: View {
     }
 
     private func selectScrolling() {
-
+        pairingAnchorPage = nil
         readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 

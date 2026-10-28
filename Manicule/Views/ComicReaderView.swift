@@ -643,12 +643,12 @@ struct ComicReaderView: View {
 
 
     private func selectAutomatic() {
-
+        pairingAnchorPage = nil
         readingPrefs.setViewMode(.paginated, twoUp: nil, for: fileHash)
     }
 
     private func selectSinglePage() {
-
+        pairingAnchorPage = nil
         readingPrefs.setViewMode(.paginated, twoUp: false, for: fileHash)
     }
 
@@ -662,7 +662,7 @@ struct ComicReaderView: View {
     }
 
     private func selectScrolling() {
-
+        pairingAnchorPage = nil
         readingPrefs.setViewMode(.scrolling, twoUp: nil, for: fileHash)
     }
 

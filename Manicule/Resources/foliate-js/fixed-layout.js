@@ -30,7 +30,7 @@ const getViewport = (doc, viewport) => {
 }
 
 export class FixedLayout extends HTMLElement {
-    static observedAttributes = ['zoom']
+    static observedAttributes = ['zoom', 'max-column-count']
     #root = this.attachShadow({ mode: 'closed' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
@@ -44,6 +44,8 @@ export class FixedLayout extends HTMLElement {
     #side
     #zoom
     #navigationQueue = Promise.resolve()
+    #pairing
+    #pairingSection
     constructor() {
         super()
 
@@ -62,6 +64,9 @@ export class FixedLayout extends HTMLElement {
     }
     attributeChangedCallback(name, _, value) {
         switch (name) {
+            case 'max-column-count':
+                this.#render()
+                break
             case 'zoom':
                 this.#zoom = value !== 'fit-width' && value !== 'fit-page'
                     ? parseFloat(value) : value
@@ -135,8 +140,9 @@ export class FixedLayout extends HTMLElement {
         const right = this.#center ?? this.#right ?? {}
         const target = side === 'left' ? left : right
         const { width, height } = this.getBoundingClientRect()
-        const portrait = this.spread !== 'both' && this.spread !== 'portrait'
-            && height > width
+        const columns = this.getAttribute('max-column-count')
+        const portrait = columns === '1' || (columns !== '2'
+            && this.spread !== 'both' && this.spread !== 'portrait' && height > width)
         this.#portrait = portrait
         const blankWidth = left.width ?? right.width ?? 0
         const blankHeight = left.height ?? right.height ?? 0
@@ -195,7 +201,10 @@ export class FixedLayout extends HTMLElement {
             if (center) {
                 const nextCenter = await this.#createFrame(center)
                 created.push(nextCenter)
-                this.#root.replaceChildren(nextCenter.element)
+                // The loaded frame is already attached. Re-inserting it with
+                // replaceChildren reloads its document in WebKit.
+                for (const child of Array.from(this.#root.children))
+                    if (child !== nextCenter.element) child.remove()
                 nextCenter.element.style.visibility = ''
                 this.#left = null
                 this.#right = null
@@ -206,7 +215,8 @@ export class FixedLayout extends HTMLElement {
                 created.push(nextLeft)
                 const nextRight = await this.#createFrame(right)
                 created.push(nextRight)
-                this.#root.replaceChildren(nextLeft.element, nextRight.element)
+                for (const child of Array.from(this.#root.children))
+                    if (child !== nextLeft.element && child !== nextRight.element) child.remove()
                 nextLeft.element.style.visibility = ''
                 nextRight.element.style.visibility = ''
                 this.#left = nextLeft
@@ -292,10 +302,50 @@ export class FixedLayout extends HTMLElement {
             return arr
         }, [{}])
     }
+    // Explicit reader pairing overrides publisher left/right hints. Keep centered
+    // plates intact, and retain the same source page across repeated toggles.
+    async setPagePairing(coverOnRight) {
+        return this.#enqueueNavigation(async () => {
+            if (this.#pairing === coverOnRight) return
+            const section = this.#pairingSection ?? this.book.sections[Math.max(0, this.index)]
+            const leading = this.rtl ? 'right' : 'left'
+            const trailing = this.rtl ? 'left' : 'right'
+            const spreads = []
+            let pair = null
+            for (const [index, section] of this.book.sections.entries()) {
+                if (section.pageSpread === 'center') {
+                    spreads.push({ center: section })
+                    pair = null
+                } else if (index === 0 && coverOnRight) {
+                    spreads.push({ [trailing]: section })
+                } else if (!pair) {
+                    pair = { [leading]: section }
+                    spreads.push(pair)
+                } else {
+                    pair[trailing] = section
+                    pair = null
+                }
+            }
+            const previousSpreads = this.#spreads
+            const previousIndex = this.#index
+            this.#spreads = spreads
+            this.#index = -1 // Even an unchanged ordinal now contains a different pair.
+            try {
+                const target = this.getSpreadOf(section)
+                if (target) await this.#goToSpread(target.index, target.side, 'pairing')
+                this.#pairingSection = section
+                this.#pairing = coverOnRight
+            } catch (error) {
+                this.#spreads = previousSpreads
+                this.#index = previousIndex
+                throw error
+            }
+        })
+    }
     get index() {
         const spread = this.#spreads[this.#index]
         const section = spread?.center ?? (this.#side === 'left'
-            ? spread.left ?? spread.right : spread.right ?? spread.left)
+            ? spread?.left ?? spread?.right : spread?.right ?? spread?.left)
         return this.book.sections.indexOf(section)
     }
     #reportLocation(reason) {
@@ -337,7 +387,10 @@ export class FixedLayout extends HTMLElement {
         this.#reportLocation(reason)
     }
     goToSpread(index, side, reason) {
-        return this.#enqueueNavigation(() => this.#goToSpread(index, side, reason))
+        return this.#enqueueNavigation(() => {
+            this.#pairingSection = null
+            return this.#goToSpread(index, side, reason)
+        })
     }
     async select(target) {
         await this.goTo(target)
@@ -353,6 +406,7 @@ export class FixedLayout extends HTMLElement {
     }
     async next() {
         return this.#enqueueNavigation(async () => {
+            this.#pairingSection = null
             const s = this.rtl ? this.#goLeft() : this.#goRight()
             if (!s) await this.#goToSpread(
                 this.#index + 1, this.rtl ? 'right' : 'left', 'page')
@@ -360,6 +414,7 @@ export class FixedLayout extends HTMLElement {
     }
     async prev() {
         return this.#enqueueNavigation(async () => {
+            this.#pairingSection = null
             const s = this.rtl ? this.#goRight() : this.#goLeft()
             if (!s) await this.#goToSpread(
                 this.#index - 1, this.rtl ? 'left' : 'right', 'page')

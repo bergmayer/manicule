@@ -27,6 +27,7 @@ let lastMarginPx = 0
 // currentColumnCount is the resolved value foliate is currently rendering.
 let columnPreference = 'auto'
 let currentColumnCount = 1
+let coverOnRight = false
 // Both margin pairs are stored locally so the bridge can pick the right one
 // when the resolved column count flips on rotation, without a Swift round trip.
 let marginsOneUp = { tb: 0, lr: 0 }
@@ -226,6 +227,8 @@ function applyResolvedColumnCount() {
     currentColumnCount = n
     if (view.renderer) {
         view.renderer.setAttribute('max-column-count', String(n))
+        if (!view.isFixedLayout)
+            view.renderer.setAttribute('spread-offset', coverOnRight ? '1' : '0')
     }
     updateMaxInlineSize()
     applyCurrentMargins()
@@ -1200,6 +1203,12 @@ window.bridge = {
             columnPreference = num
         }
         applyResolvedColumnCount()
+    },
+
+    async setPagePairing(shifted) {
+        coverOnRight = Boolean(shifted)
+        if (view.isFixedLayout) await view.renderer.setPagePairing(coverOnRight)
+        else applyResolvedColumnCount()
     },
 
     setGap(value) {

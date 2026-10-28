@@ -327,11 +327,17 @@ class View {
         this.setImageSize()
         this.expand()
     }
-    columnize({ width, height, gap, columnWidth }) {
+    columnize({ width, height, gap, columnWidth, spreadOffset }) {
         const vertical = this.#vertical
         this.#size = vertical ? height : width
 
         const doc = this.document
+        // Reserve one blank column without inserting nodes into the publication:
+        // existing CFIs, selections, search ranges, and narration stay valid.
+        const leading = gap / 2 + (spreadOffset ? this.#size / 2 : 0)
+        const padding = vertical ? `${leading}px 0 ${gap / 2}px`
+            : this.#rtl ? `0 ${leading}px 0 ${gap / 2}px`
+            : `0 ${gap / 2}px 0 ${leading}px`
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': `${Math.trunc(columnWidth)}px`,
@@ -340,7 +346,7 @@ class View {
             ...(vertical
                 ? { 'width': `${width}px` }
                 : { 'height': `${height}px` }),
-            'padding': vertical ? `${gap / 2}px 0` : `0 ${gap / 2}px`,
+            'padding': padding,
             'overflow': 'hidden',
             // force wrap long words
             'overflow-wrap': 'break-word',
@@ -445,7 +451,7 @@ class View {
 export class Paginator extends HTMLElement {
     static observedAttributes = [
         'flow', 'gap', 'margin',
-        'max-inline-size', 'max-block-size', 'max-column-count',
+        'max-inline-size', 'max-block-size', 'max-column-count', 'spread-offset',
     ]
     #root = this.attachShadow({ mode: 'closed' })
     #observer = new ResizeObserver(() => this.render())
@@ -651,6 +657,7 @@ export class Paginator extends HTMLElement {
     attributeChangedCallback(name, _, value) {
         switch (name) {
             case 'flow':
+            case 'spread-offset':
                 this.render()
                 break
             case 'gap':
@@ -788,7 +795,8 @@ export class Paginator extends HTMLElement {
         this.#header.replaceChildren(...heads)
         this.#footer.replaceChildren(...feet)
 
-        return { height, width, margin, gap, columnWidth }
+        return { height, width, margin, gap, columnWidth,
+            spreadOffset: divisor === 2 && this.getAttribute('spread-offset') === '1' }
     }
     render() {
         if (!this.#view) return
